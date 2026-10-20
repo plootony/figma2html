@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Site to Figma</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --text:#1c1c1a; --muted:#6b6b66; --line:#e3e3de; --accent:#0d66ff; --ok:#1a8f4c; --err:#c62f2f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --card:#1f1f1d; --text:#ececea; --muted:#9a9a94; --line:#33332f; --accent:#4d8dff; --ok:#3fbf75; --err:#ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:40px 16px 60px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; }
+  input[type=text] { flex:1; min-width:0; padding:10px 12px; font-size:15px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); }
+  button { padding:10px 16px; font-size:15px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; white-space:nowrap; }
+  button.secondary, a.btn { background:transparent; color:var(--accent); border:1px solid var(--line); padding:6px 12px; font-size:14px; border-radius:8px; text-decoration:none; white-space:nowrap; }
+  a.btn { background:var(--accent); color:#fff; border-color:var(--accent); }
+  a.btn.secondary { background:transparent; color:var(--accent); border-color:var(--line); }
+  .actions { display:flex; gap:8px; flex-shrink:0; }
+  button:disabled { opacity:.5; cursor:default; }
+  .opts { display:flex; flex-wrap:wrap; gap:16px 24px; margin-top:14px; color:var(--muted); font-size:14px; }
+  .opts label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+  details { margin-top:12px; font-size:14px; color:var(--muted); }
+  details input { width:100%; margin-top:6px; }
+  #status { min-height:22px; margin:12px 0 0; font-size:14px; }
+  .err { color:var(--err); } .ok { color:var(--ok); }
+  .res { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  .res:first-child { border-top:0; }
+  .res .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+  .res .meta { color:var(--muted); font-size:12px; }
+  @media (max-width:560px) { .res { flex-wrap:wrap; } .res > div:first-child { flex-basis:100%; } }
+  h2 { font-size:15px; margin:0 0 8px; }
+  ol { margin:0; padding-left:20px; color:var(--muted); font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Site → Figma</h1>
+  <p class="sub">Введите адрес сайта и нажмите «Захватить». Результат — файл .fig для импорта в Figma или копия для вставки через Ctrl+V.</p>
+
+  <div class="card">
+    <form id="f" class="row">
+      <input id="url" type="text" placeholder="example.com" autocomplete="url" autofocus>
+      <button id="go" type="submit">Захватить</button>
+    </form>
+    <div class="opts">
+      <label><input type="checkbox" name="w" value="1440" checked> Desktop 1440</label>
+      <label><input type="checkbox" name="w" value="768"> Tablet 768</label>
+      <label><input type="checkbox" name="w" value="390"> Mobile 390</label>
+      <label><input type="checkbox" id="abs"> Без auto layout</label>
+    </div>
+    <details>
+      <summary>Убрать элементы перед захватом (cookie-баннеры, чаты…)</summary>
+      <input id="hide" type="text" placeholder="CSS-селекторы через запятую, например: #cookie-banner, .chat-widget">
+    </details>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="resultsCard" hidden>
+    <h2>Готово</h2>
+    <div id="results"></div>
+  </div>
+
+  <div class="card">
+    <h2>История</h2>
+    <div id="history"><span class="meta">Пусто</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Как открыть в Figma</h2>
+    <ol>
+      <li><b>Файл .fig:</b> нажмите «Скачать .fig», затем в Figma на главной странице (Drafts) перетащите файл в окно или выберите «Import». Откроется новый файл.</li>
+      <li><b>Через буфер:</b> нажмите «Копировать» и вставьте в открытый файл Figma (Ctrl+V).</li>
+    </ol>
+  </div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const status = (msg, cls = "") => { $("#status").className = cls; $("#status").textContent = msg; };
+
+async function copyHtml(html) {
+  // Primary path: async Clipboard API with text/html.
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }) })]);
+    return true;
+  } catch {}
+  // Fallback: copy event inside the click gesture.
+  let ok = false;
+  const onCopy = (e) => { e.clipboardData.setData("text/html", html); e.preventDefault(); ok = true; };
+  document.addEventListener("copy", onCopy);
+  document.execCommand("copy");
+  document.removeEventListener("copy", onCopy);
+  return ok;
+}
+
+function copyButton(getHtml) {
+  const b = document.createElement("button");
+  b.className = "secondary";
+  b.textContent = "Копировать";
+  b.onclick = async () => {
+    const html = await getHtml();
+    const ok = await copyHtml(html);
+    b.textContent = ok ? "Скопировано ✓" : "Ошибка копирования";
+    setTimeout(() => (b.textContent = "Копировать"), 2000);
+  };
+  return b;
+}
+
+function row(name, meta, base, hasSvg) {
+  const d = document.createElement("div");
+  d.className = "res";
+  const t = document.createElement("div");
+  t.style.minWidth = "0";
+  t.innerHTML = `<div class="name"></div><div class="meta"></div>`;
+  t.children[0].textContent = name;
+  t.children[1].textContent = meta;
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const a = document.createElement("a");
+  a.className = "btn";
+  a.href = "/fig?base=" + encodeURIComponent(base);
+  a.textContent = "Скачать .fig";
+  actions.append(a, copyButton(fromServer(base)));
+  if (hasSvg) {
+    const z = document.createElement("a");
+    z.className = "btn secondary";
+    z.href = "/svgzip?base=" + encodeURIComponent(base);
+    z.textContent = "SVG";
+    z.title = "Оригиналы сложных SVG (перенесены картинками) — перетащите в Figma";
+    actions.append(z);
+  }
+  d.append(t, actions);
+  return d;
+}
+
+const cache = new Map();
+const fromServer = (base) => async () => {
+  if (!cache.has(base)) cache.set(base, await (await fetch("/clipboard?base=" + encodeURIComponent(base))).text());
+  return cache.get(base);
+};
+
+async function loadHistory() {
+  const list = await (await fetch("/history")).json();
+  const h = $("#history");
+  if (!list.length) return;
+  h.innerHTML = "";
+  for (const { base, mtime, hasSvg } of list) h.append(row(base.replace(/_\d+$/, ""), new Date(mtime).toLocaleString(), base, hasSvg));
+}
+
+$("#f").onsubmit = async (e) => {
+  e.preventDefault();
+  const url = $("#url").value.trim();
+  const widths = [...document.querySelectorAll("input[name=w]:checked")].map((i) => +i.value);
+  if (!url) return status("Введите адрес", "err");
+  if (!widths.length) return status("Выберите хотя бы один размер", "err");
+  $("#go").disabled = true;
+  const t = Date.now();
+  const timer = setInterval(() => status(`Захват… ${Math.round((Date.now() - t) / 1000)} с`), 500);
+  try {
+    const r = await fetch("/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, widths, layout: $("#abs").checked ? "absolute" : "auto", hideSelectors: $("#hide").value }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    clearInterval(timer);
+    const notes = data.results.flatMap((x) => x.log);
+    status(`Готово за ${Math.round((Date.now() - t) / 1000)} с. ${notes.join(" ")}`, "ok");
+    $("#resultsCard").hidden = false;
+    const box = $("#results");
+    box.innerHTML = "";
+    for (const res of data.results) {
+      box.append(row(res.name, `высота ${res.height}px · ${res.nodes} слоёв · ${res.images} картинок · .fig ${(res.figSize / 1024 / 1024).toFixed(1)} МБ`, res.base, res.svgCount > 0));
+    }
+    loadHistory();
+  } catch (err) {
+    clearInterval(timer);
+    status("Ошибка: " + err.message, "err");
+  } finally {
+    $("#go").disabled = false;
+  }
+};
+
+loadHistory().catch(() => {});
+</script>
+</body>
+</html>

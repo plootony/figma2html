@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Generated captures, archives and logs
+output/
+*.fig
+*.zip
+*.log
+npm-debug.log*
+
+# Local environment
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

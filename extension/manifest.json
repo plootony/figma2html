@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Site to Figma",
+  "version": "1.2.6",
+  "description": "Конвертирует открытую страницу в редактируемый дизайн Figma (файл .fig или вставка через буфер) и скачивает все медиа страницы.",
+  "action": {
+    "default_title": "Site to Figma — захватить страницу",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "clipboardWrite",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "fonts/*.ttf"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

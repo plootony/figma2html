@@ -1,0 +1,21 @@
+{
+  "name": "site2figma",
+  "version": "1.0.0",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "build": "node build.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Захват сайта по URL в Figma (вставка через буфер обмена)",
+  "dependencies": {
+    "@figit/dom-to-figma": "^0.2.4",
+    "@figit/fig-kiwi": "^0.2.0",
+    "esbuild": "^0.28.2",
+    "fflate": "^0.8.3",
+    "puppeteer-core": "^24.43.1"
+  },
+  "type": "module"
+}
