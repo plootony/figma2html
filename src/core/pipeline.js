@@ -57,7 +57,6 @@ const isTextElement = (el) =>
 
 // Scroll through the page so lazy-loaded images and sections render.
 async function autoScroll() {
-  const start = window.scrollY;
   const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
   for (let y = 0; y < document.documentElement.scrollHeight && y < 60000; y += step) {
     window.scrollTo(0, y);
@@ -65,7 +64,6 @@ async function autoScroll() {
   }
   window.scrollTo(0, 0);
   await wait(300);
-  return start;
 }
 
 // ::before / ::after are invisible to the converter (it walks real DOM nodes). Each rendered
@@ -239,7 +237,6 @@ function normalizeTypography(journal) {
     return cache.get(key);
   };
   const ALIGN = { start: "left", "-webkit-left": "left", end: "right", "-webkit-right": "right", "-webkit-center": "center" };
-  const counts = { lineHeights: 0, aligns: 0, spacings: 0 };
   for (const el of document.querySelectorAll("body, body *")) {
     if (el === probe || !isTextElement(el)) continue;
     const cs = getComputedStyle(el);
@@ -249,22 +246,18 @@ function normalizeTypography(journal) {
       if (m) {
         const px = m[2] === "%" ? (parseFloat(m[1]) / 100) * fontSize : parseFloat(m[1]) * fontSize;
         journal.set(el, prop, px + "px");
-        counts.spacings++;
       }
     }
     if (cs.lineHeight === "normal") {
       journal.set(el, "line-height", normalLineHeight(cs) + "px");
-      counts.lineHeights++;
     }
     const align = ALIGN[cs.textAlign];
     if (align && !(align === "left" && cs.textAlign === "start" && cs.direction !== "rtl")) {
       const physical = cs.direction === "rtl" && align !== "center" ? (align === "left" ? "right" : "left") : align;
       journal.set(el, "text-align", physical);
-      counts.aligns++;
     }
   }
   probe.remove();
-  return counts;
 }
 
 // The converter takes text nodes verbatim, but the browser collapses whitespace per CSS

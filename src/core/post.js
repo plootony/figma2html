@@ -231,9 +231,9 @@ export function shiftTextBox(n, dy, height) {
 
 // Sites often serve full-size photos for small thumbnails. Downscale every image to
 // 2x its largest on-page size, so Figma doesn't run out of memory.
-// `resize(bytes, mime, w, h)` → { bytes } | null is provided by the environment.
+// `resize(bytes, w, h)` → Uint8Array | null is provided by the environment.
 export async function optimizeImages(message, resize, scale = 2) {
-  const uses = new Map(); // blob index -> { w, h, paints, mime }
+  const uses = new Map(); // blob index -> { w, h, paints }
   for (const n of message.nodeChanges) {
     for (const p of [...(n.fillPaints || []), ...(n.strokePaints || [])]) {
       if (p.type !== "IMAGE" || p.image?.dataBlob == null) continue;

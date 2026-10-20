@@ -3,7 +3,7 @@
 const VIDEO_EXT = /\.(mp4|webm|ogv|ogg|mov|m4v)(\?|#|$)/i;
 const SVG_EXT = /\.svg(\?|#|$)/i;
 
-export function kindOf(url) {
+function kindOf(url) {
   if (url.startsWith("data:")) return /^data:image\/svg/.test(url) ? "svg" : /^data:video/.test(url) ? "video" : "image";
   if (SVG_EXT.test(url)) return "svg";
   if (VIDEO_EXT.test(url)) return "video";

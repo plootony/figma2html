@@ -237,13 +237,6 @@ export function parseFontFaces(cssText, baseUrl) {
   return faces;
 }
 
-// Families the page provides as usable single static files.
-export function usablePageFamilies(faces) {
-  const out = new Set();
-  for (const f of faces) if (f.weightMin === f.weightMax && !f.unicodeRange) out.add(f.family);
-  return out;
-}
-
 // The page's own file for a request. Skipped (→ Google Fonts) for variable fonts (one file
 // for a weight range: the converter can't apply the axis) and unicode-range subsets (the
 // converter takes a single file per style).

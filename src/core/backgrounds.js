@@ -12,7 +12,7 @@ const IDENTITY = { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
 const MAX_SEPARATE_TILES = 60;
 
 // Split a computed list value on top-level commas: "url(a), linear-gradient(x, y)".
-export function splitLayers(value) {
+function splitLayers(value) {
   const out = [];
   let depth = 0;
   let quote = null;
