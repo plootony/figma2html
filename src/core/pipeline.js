@@ -55,6 +55,16 @@ const ownText = (el) => [...el.childNodes].filter((n) => n.nodeType === 3).map((
 const isTextElement = (el) =>
   TEXT_CHAR.test(ownText(el)) || ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && el.placeholder);
 
+// The captured root: <body> for a whole page, or the chosen block. Subtree helpers use it so
+// a block capture leaves the rest of the page (and its expensive media) alone.
+const subtree = (root) => [root, ...root.querySelectorAll("*")];
+const describe = (el) => {
+  const tag = el.tagName.toLowerCase();
+  const id = el.id ? `#${el.id}` : "";
+  const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((c) => `.${c}`).join("") : "";
+  return tag + id + cls;
+};
+
 // Scroll through the page so lazy-loaded images and sections render.
 async function autoScroll() {
   const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
@@ -89,12 +99,12 @@ function pseudoContent(value, host) {
   return { text };
 }
 
-export function materializePseudoElements(journal) {
+export function materializePseudoElements(journal, root = document.body) {
   const hideRule = document.createElement("style");
   hideRule.textContent =
     "[data-s2f-before]::before{content:none!important;display:none!important}[data-s2f-after]::after{content:none!important;display:none!important}";
   const created = [];
-  for (const host of document.querySelectorAll("body, body *")) {
+  for (const host of subtree(root)) {
     if (NO_PSEUDO.has(host.tagName.toUpperCase()) || host.closest("svg")) continue;
     for (const which of ["before", "after"]) {
       const cs = getComputedStyle(host, "::" + which);
@@ -156,9 +166,10 @@ async function collectFontFaces(net) {
 // Fonts Figma doesn't have (not on Google Fonts: SF Pro, Motiva Sans, Arial, Times…) are
 // replaced with similar Google fonts in the page itself, so the browser layout and the
 // Figma file use the same, available font. Icon fonts are left alone.
-async function substituteFonts(chars, fonts, journal, bundledFont) {
+async function substituteFonts(chars, fonts, journal, bundledFont, root = document.body) {
+  const elements = subtree(root);
   const stacks = new Set();
-  for (const el of document.querySelectorAll("body, body *")) if (isTextElement(el)) stacks.add(getComputedStyle(el).fontFamily);
+  for (const el of elements) if (isTextElement(el)) stacks.add(getComputedStyle(el).fontFamily);
   const plan = {};
   for (const stack of stacks) {
     const first = firstFamily(stack);
@@ -184,7 +195,7 @@ async function substituteFonts(chars, fonts, journal, bundledFont) {
         })
     )
   );
-  for (const el of document.querySelectorAll("body, body *")) {
+  for (const el of elements) {
     const target = plan[getComputedStyle(el).fontFamily];
     if (target) journal.set(el, "font-family", `"${target}"`);
   }
@@ -215,7 +226,7 @@ async function substituteFonts(chars, fonts, journal, bundledFont) {
 //   measured in the browser and pinned in px;
 // - logical/vendor text-align values (start, end, -webkit-center) → physical ones;
 // - letter/word spacing in % or em → px (the converter would read "40%" as 40px).
-function normalizeTypography(journal) {
+function normalizeTypography(journal, root = document.body) {
   const probe = document.createElement("div");
   probe.style.cssText =
     "position:absolute;left:-10000px;top:0;display:block;white-space:nowrap;line-height:normal;padding:0;border:0;margin:0;";
@@ -237,7 +248,7 @@ function normalizeTypography(journal) {
     return cache.get(key);
   };
   const ALIGN = { start: "left", "-webkit-left": "left", end: "right", "-webkit-right": "right", "-webkit-center": "center" };
-  for (const el of document.querySelectorAll("body, body *")) {
+  for (const el of subtree(root)) {
     if (el === probe || !isTextElement(el)) continue;
     const cs = getComputedStyle(el);
     const fontSize = parseFloat(cs.fontSize);
@@ -264,9 +275,9 @@ function normalizeTypography(journal) {
 // `white-space`: source formatting like "сердца!\n\n            Новые" renders as one space.
 // Verbatim, the extra spaces and newlines broke the converter's line layout (lines running
 // out of their box, words split). Collapse them in the DOM the way the browser renders them.
-function collapseWhitespace(journal) {
+function collapseWhitespace(journal, root = document.body) {
   let changed = 0;
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let node; (node = walker.nextNode()); ) {
     const text = node.textContent;
     if (!/[ \t\n\r\f]{2}|[\t\n\r\f]/.test(text)) continue;
@@ -296,9 +307,10 @@ const lineRects = (node) => {
 // of the text is shared with other content of the block (text after a <br> qualifies).
 globalThis.__s2fTextBox = (node) => {
   const el = node.nodeType === 3 ? node.parentElement : node;
+  const stop = globalThis.__s2fCaptureRoot || document.body;
   let block = el;
-  while (block && block !== document.body && /^(inline|contents)/.test(getComputedStyle(block).display)) block = block.parentElement;
-  if (!block) return null;
+  while (block && block !== stop && /^(inline|contents)/.test(getComputedStyle(block).display)) block = block.parentElement;
+  if (!block) block = stop;
   const own = lineRects(node);
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
@@ -365,7 +377,10 @@ function alignTextBoxesToLineBox(message, trace, rootTop) {
 
 // position: fixed / sticky → Figma's prototype scroll behavior ("Fixed" / "Sticky").
 // Resolved through the trace, while the prepared DOM is still in place.
-const resolveTraceElement = (domPath) => (domPath === ":scope" ? document.body : document.body.querySelector(domPath));
+const resolveTraceElement = (domPath) => {
+  const root = globalThis.__s2fCaptureRoot || document.body;
+  return domPath === ":scope" ? root : root.querySelector(domPath);
+};
 
 function markScrollBehavior(message, trace) {
   const byId = new Map(message.nodeChanges.map((n) => [`${n.guid.sessionID}:${n.guid.localID}`, n]));
@@ -440,6 +455,10 @@ export async function capture(options, env) {
   const log = [];
   const t0 = Date.now();
   const startScroll = window.scrollY;
+  const target = options.target?.isConnected ? options.target : options.targetSelector ? document.querySelector(options.targetSelector) : document.body;
+  if (!target) throw new Error(`Блок не найден: ${options.targetSelector}`);
+  const block = target !== document.body;
+  globalThis.__s2fCaptureRoot = target;
   try {
     if (freezeAnimations) {
       // Elements are captured in their final state, not mid-animation.
@@ -463,31 +482,39 @@ export async function capture(options, env) {
     // Before any DOM changes: temporary elements carry inline !important styles that the
     // "hide everything else" rule of the snapshot can't override.
     progress("Снимки canvas/видео…");
-    const snapshots = await snapshotMediaElements(env.captureViewport);
+    const snapshots = await snapshotMediaElements(env.captureViewport, target);
 
-    const pseudo = materializePseudoElements(journal);
-    const whitespace = collapseWhitespace(journal);
+    const pseudo = materializePseudoElements(journal, target);
+    const whitespace = collapseWhitespace(journal, target);
     progress("SVG…");
-    const svgUses = await resolveSvgUses(journal, net);
-    const svgs = await prepareSvgImages(journal, net);
+    const svgUses = await resolveSvgUses(journal, net, target);
+    const svgs = await prepareSvgImages(journal, net, target);
 
     progress("Шрифты…");
     let text = "";
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) text += walker.currentNode.textContent;
-    document.querySelectorAll("input, textarea").forEach((el) => (text += (el.placeholder || "") + (el.value || "")));
+    for (const el of [target, ...target.querySelectorAll("input, textarea")]) {
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") text += (el.placeholder || "") + (el.value || "");
+    }
     const chars = charsetOf(text);
     const pageFaces = await collectFontFaces(net);
-    const substitutions = await substituteFonts(chars, fonts, journal, env.bundledFont);
+    const substitutions = await substituteFonts(chars, fonts, journal, env.bundledFont, target);
     if (substitutions.length) log.push("Замена шрифтов: " + substitutions.join(", "));
-    normalizeTypography(journal);
+    normalizeTypography(journal, target);
 
-    const width = document.documentElement.clientWidth;
-    const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    const rect = target.getBoundingClientRect();
+    const width = block ? Math.max(1, Math.round(rect.width)) : document.documentElement.clientWidth;
+    const height = block ? Math.max(1, Math.round(rect.height)) : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    if (block && (!rect.width || !rect.height)) throw new Error("Выбранный блок не виден на странице (нулевой размер)");
     const viewportHeight = Math.max(1, Math.round(window.innerHeight));
-    const name = `${document.title || location.hostname} — ${width}px`;
-    window.scrollTo(0, 0);
+    const name = block ? `${document.title || location.hostname} — ${describe(target)} — ${width}px` : `${document.title || location.hostname} — ${width}px`;
+    if (block) {
+      target.scrollIntoView({ block: "start", inline: "nearest" });
+      await wait(100);
+    } else window.scrollTo(0, 0);
     const thumbnail = (env.thumbnail && (await env.thumbnail().catch(() => null))) || (await placeholderThumbnail(width, Math.min(height, width * 0.625)));
+    window.scrollTo(0, 0);
 
     progress("Конвертация…");
     const fontSources = new Map();
@@ -524,8 +551,14 @@ export async function capture(options, env) {
       },
     });
     globalThis.__s2fErrors = [];
-    const rootTop = document.body.getBoundingClientRect().top;
-    const result = await converter.convert({ element: document.body, width, height, name });
+    const rootTop = target.getBoundingClientRect().top;
+    globalThis.__s2fRootAtOrigin = block;
+    let result;
+    try {
+      result = await converter.convert({ element: target, width, height, name });
+    } finally {
+      delete globalThis.__s2fRootAtOrigin;
+    }
 
     // Elements the converter failed on (kept as plain frames with their content).
     const failures = (globalThis.__s2fErrors || []).map(({ node, error }) => {
@@ -584,6 +617,7 @@ export async function capture(options, env) {
       debug: { failures, seconds: (Date.now() - t0) / 1000, fixes, images, fonts: Object.fromEntries(fontSources), message, trace: result.trace },
     };
   } finally {
+    delete globalThis.__s2fCaptureRoot;
     const restore = () => {
       journal.restore();
       window.scrollTo(0, startScroll);

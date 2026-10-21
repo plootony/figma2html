@@ -13,11 +13,13 @@ const SOLO_CSS =
   "html[data-s2f-solo-mode] *:not([data-s2f-solo]){visibility:hidden!important}" +
   "html[data-s2f-solo-mode] [data-s2f-solo]{visibility:visible!important}";
 
-/** Screenshot every visible canvas/video. Returns Map(element → PNG bytes). */
-export async function snapshotMediaElements(captureViewport) {
+/** Screenshot every visible canvas/video inside `root`. Returns Map(element → PNG bytes). */
+export async function snapshotMediaElements(captureViewport, root = document.body) {
   const result = new Map();
   if (!captureViewport) return result;
-  const targets = [...document.querySelectorAll("body canvas, body video")].filter((el) => {
+  const found = root === document.body ? [...document.body.querySelectorAll("canvas, video")] : [...root.querySelectorAll("canvas, video")];
+  if (root.matches?.("canvas, video")) found.unshift(root);
+  const targets = found.filter((el) => {
     const r = el.getBoundingClientRect();
     return r.width >= 16 && r.height >= 16 && getComputedStyle(el).visibility !== "hidden";
   });

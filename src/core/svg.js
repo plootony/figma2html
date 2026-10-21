@@ -80,7 +80,7 @@ const LAYOUT_PROPS = [
  * Inline simple SVG <img>s; collect the originals of the complex ones.
  * Returns { inlined, originals: Map(url -> { name, text, reason }) }.
  */
-export async function prepareSvgImages(journal, net) {
+export async function prepareSvgImages(journal, net, root = document.body) {
   const originals = new Map();
   const texts = new Map(); // url -> Promise<text | null>
   const getText = (url) => {
@@ -88,7 +88,9 @@ export async function prepareSvgImages(journal, net) {
     return texts.get(url);
   };
   let inlined = 0;
-  for (const img of [...document.querySelectorAll("img")]) {
+  const images = [...root.querySelectorAll("img")];
+  if (root.tagName === "IMG") images.unshift(root);
+  for (const img of images) {
     const url = img.currentSrc || img.src;
     if (!url || !isSvgUrl(url)) continue;
     const rect = img.getBoundingClientRect();
@@ -179,7 +181,7 @@ function inlineSpriteStyles(doc) {
   return doc;
 }
 
-export async function resolveSvgUses(journal, net) {
+export async function resolveSvgUses(journal, net, root = document.body) {
   const sprites = new Map(); // url -> Promise<Document | null>
   const loadSprite = (url) => {
     if (!sprites.has(url)) {
@@ -193,7 +195,8 @@ export async function resolveSvgUses(journal, net) {
     return sprites.get(url);
   };
   let resolved = 0;
-  for (const use of [...document.querySelectorAll("svg use")]) {
+  const uses = [...root.querySelectorAll("svg use"), ...(root.tagName === "SVG" ? root.querySelectorAll("use") : [])];
+  for (const use of uses) {
     const href = use.getAttribute("href") || use.getAttributeNS(XLINK, "href") || "";
     const hash = href.indexOf("#");
     if (hash < 0) continue;

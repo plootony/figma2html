@@ -84,7 +84,7 @@ const FREEZE_CSS = `*,*::before,*::after{animation-duration:0s!important;animati
  * Capture a page. Returns { name, height, fig (Buffer), clipboardHtml, nodes, images, log, debug, trace? }.
  * `inspect(page, trace)` (optional, verify.mjs) runs on the live page after the capture.
  */
-export async function capturePage({ url, width, layout = "auto", hideSelectors = "", inspect }) {
+export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", inspect }) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   const log = [];
@@ -116,10 +116,21 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
     await page.waitForNetworkIdle({ idleTime: 800, concurrency: 2, timeout: 8000 }).catch(() => {});
 
     const height = await page.evaluate(() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+    const targetRect = targetSelector
+      ? await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x + window.scrollX, y: r.y + window.scrollY, width: r.width, height: r.height };
+        }, targetSelector)
+      : null;
+    if (targetSelector && (!targetRect || targetRect.width < 1 || targetRect.height < 1)) throw new Error(`Блок не найден или не виден: ${targetSelector}`);
     stage("before thumbnail");
     const thumbnail = await page.screenshot({
       type: "png",
-      clip: { x: 0, y: 0, width, height: Math.min(height, Math.round(width * 0.625)), scale: 400 / width },
+      clip: targetRect
+        ? { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: Math.min(targetRect.height, Math.round(targetRect.width * 0.625)), scale: 400 / targetRect.width }
+        : { x: 0, y: 0, width, height: Math.min(height, Math.round(width * 0.625)), scale: 400 / width },
     });
 
     stage("thumbnail");
@@ -132,6 +143,7 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
         res = await page.evaluate((opts) => window.__s2fCapture(opts), {
           layout,
           hideSelectors,
+          targetSelector,
           thumbnailB64: Buffer.from(thumbnail).toString("base64"),
           withTrace: Boolean(inspect),
         });

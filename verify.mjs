@@ -1,24 +1,30 @@
 // Typography check: captures a page and compares every Figma TEXT node with the
 // browser's rendering of its source DOM text.
-// Usage: node verify.mjs <url> [width]
+// Usage: node verify.mjs <url> [width] [block selector]
 import { decodeFigmaData } from "@figit/fig-kiwi";
 import { capturePage, closeBrowser } from "./capture.mjs";
 
 const url = process.argv[2];
 const width = Number(process.argv[3]) || 1440;
+const targetSelector = process.argv[4] || "";
 if (!url) {
-  console.error("Usage: node verify.mjs <url> [width]");
+  console.error("Usage: node verify.mjs <url> [width] [block selector]");
   process.exit(1);
 }
 
 // Runs in the page: DOM truth for every traced text node.
-function domTruth(entries) {
+function domTruth([entries, targetSelector]) {
   const canvas = document.createElement("canvas").getContext("2d");
+  const root = targetSelector ? document.querySelector(targetSelector) : document.body;
+  // In block mode message coordinates are relative to the block, not the document.
+  const rootRect = targetSelector ? root.getBoundingClientRect() : null;
+  const originTop = rootRect ? rootRect.top : -window.scrollY;
+  const originLeft = rootRect ? rootRect.left : 0;
   const out = {};
   for (const e of entries) {
     const m = e.domPath.match(/^(.*)::text\[(\d+)\]$/);
     const elPath = m ? m[1] : e.domPath;
-    const owner = elPath === ":scope" ? document.body : document.body.querySelector(elPath);
+    const owner = elPath === ":scope" ? root : root.querySelector(elPath);
     if (!owner) continue;
     const textNode = m ? owner.childNodes[Number(m[2])] : owner;
     const el = textNode.nodeType === 3 ? textNode.parentElement : textNode;
@@ -48,9 +54,9 @@ function domTruth(entries) {
       weight: Number(cs.fontWeight),
       lines: tops.length,
       // Top of the first CSS line box (content area centred in line-height) and baseline.
-      lineTop: first.top + window.scrollY - (lh - first.height) / 2,
-      baseline: first.top + window.scrollY + asc,
-      left: first.left,
+      lineTop: first.top + window.scrollY - originTop - (lh - first.height) / 2,
+      baseline: first.top + window.scrollY - originTop + asc,
+      left: first.left - originLeft,
       width: el.getBoundingClientRect().width,
     };
   }
@@ -60,7 +66,8 @@ function domTruth(entries) {
 const { clipboardHtml, inspected: truth } = await capturePage({
   url,
   width,
-  inspect: (page, trace) => page.evaluate(domTruth, trace.entries.filter((e) => e.kind === "text")),
+  targetSelector,
+  inspect: (page, trace) => page.evaluate(domTruth, [trace.entries.filter((e) => e.kind === "text"), targetSelector]),
 });
 await closeBrowser();
 const message = decodeFigmaData(Buffer.from(clipboardHtml.match(/\(figma\)([^(]*)\(\/figma\)/)[1], "base64")).message;

@@ -84,6 +84,19 @@ const PATCHES = [
     replace: "buildBaselines(layout, styles.fontSize, styles.textAlign, adjustedSize.width, loadedFont.metrics)",
   },
   {
+    // Capturing a block (not the whole body): the root element is placed at its offset in
+    // its parent, which would shift the content inside the output frame. Put it at 0,0.
+    find: "\t\t\tposition: getElementPositionRelativeToParent(node),",
+    replace:
+      "\t\t\tposition: globalThis.__s2fRootAtOrigin && parentGuid === ROOT_FRAME_GUID ? { x: 0, y: 0 } : getElementPositionRelativeToParent(node),",
+  },
+  {
+    // Same for the root element's positioning constraints: a fixed block would otherwise
+    // be offset inside the output frame again.
+    find: "\tconst finalPosition = positionOverride ?? position;",
+    replace: "\tconst finalPosition = globalThis.__s2fRootAtOrigin && parentGuid === ROOT_FRAME_GUID ? position : positionOverride ?? position;",
+  },
+  {
     // PostScript name from the page's own font file can belong to another cut of the family
     // (FinlandicaText-Regular for CSS family "Finlandica"). Figma looks the font up by it and
     // pastes empty text layers. Google/Figma name fonts <FamilyNoSpaces>-<StyleNoSpaces>,

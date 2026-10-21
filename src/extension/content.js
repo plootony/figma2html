@@ -2,6 +2,8 @@
 // captured). Runs the in-page pipeline; network and the thumbnail go through background.js.
 import { capture } from "../core/pipeline.js";
 import { scanMedia } from "./media.js";
+import { pickElement, describe } from "./picker.js";
+import { scanFonts } from "./fontscan.js";
 
 
 function send(msg) {
@@ -64,6 +66,23 @@ button:disabled { opacity: .5; cursor: default; }
 .medianame { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mediameta { color: #9a9a94; font-size: 11px; }
 button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36; background: transparent; color: #4d8dff; font: inherit; cursor: pointer; }
+.targetrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.targetname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #4d8dff; font-size: 12px; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 12px); z-index: 2147483647;
+  background: #1f1f1d; color: #ececea; border: 1px solid #3a3a36; border-radius: 10px; padding: 10px 16px;
+  font: 600 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.progress { height: 4px; margin-top: 8px; border-radius: 2px; background: #161615; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: #4d8dff; transition: width .18s ease; }
+.fontpreview { flex: none; width: 42px; height: 38px; display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; background: #161615; color: #ececea; font-size: 20px; overflow: hidden; }
+.advanced { margin-top: 10px; border-top: 1px solid #3a3a36; padding-top: 8px; }
+.advanced summary { display: flex; align-items: center; gap: 6px; cursor: pointer; color: #9a9a94; font-size: 12px; list-style: none; }
+.advanced summary::-webkit-details-marker { display: none; }
+.advanced summary::before { content: "▸"; color: #4d8dff; }
+.advanced[open] summary::before { content: "▾"; }
+.advanced-body { padding-top: 2px; }
 `;
 
 // Inter shipped with the extension (fonts/), used when Google Fonts can't be reached.
@@ -104,17 +123,28 @@ function createPanel() {
   root.innerHTML = `<style>${CSS}</style>
     <div class="panel">
       <div class="head"><span class="title">Site → Figma</span><button class="close" title="Закрыть">×</button></div>
-      <div class="tabs"><button class="active" data-tab="figma">В Figma</button><button data-tab="media">Медиа</button></div>
+      <div class="tabs"><button class="active" data-tab="figma">В Figma</button><button data-tab="media">Медиа</button><button data-tab="fonts">Шрифты</button></div>
       <div class="tab tab-figma">
       <div class="muted width"></div>
-      <label><input type="checkbox" class="abs"> Без auto layout</label>
-      <div class="muted">Убрать перед захватом (CSS-селекторы через запятую):</div>
-      <input type="text" class="hide" placeholder="#cookie-banner, .chat-widget">
+      <button class="secondary pick">Выбрать блок на странице</button>
+      <div class="targetrow hidden"><span class="targetname"></span><button class="small clear">Сбросить</button></div>
+      <details class="advanced">
+        <summary>Дополнительные настройки</summary>
+        <div class="advanced-body">
+          <label><input type="checkbox" class="abs"> Без auto layout</label>
+          <label><input type="checkbox" class="exclude"> Исключить блоки</label>
+          <div class="hidebox hidden">
+            <div class="muted">Убрать перед захватом (CSS-селекторы через запятую):</div>
+            <input type="text" class="hide" placeholder="#cookie-banner, .chat-widget">
+          </div>
+        </div>
+      </details>
       <button class="primary go">Захватить страницу</button>
       <div class="status"></div>
+      <div class="progress hidden"><i></i></div>
       <div class="result hidden">
-        <button class="primary download">Скачать .fig</button>
-        <button class="secondary copy">Копировать для вставки в Figma</button>
+        <button class="primary copy">Копировать для вставки в Figma</button>
+        <button class="secondary download">Скачать .fig</button>
         <div class="svgblock hidden">
           <div class="muted svgnote">SVG с градиентами, тенями или анимацией перенесены картинками (слои «SVG: имя файла»). Чтобы получить векторы: в Figma выделите такой слой, здесь нажмите «Копировать», в Figma — Ctrl+Shift+R (вставить с заменой).</div>
           <div class="svglist"></div>
@@ -135,7 +165,17 @@ function createPanel() {
         </div>
         <div class="status mstatus"></div>
       </div>
-    </div>`;
+      <div class="tab tab-fonts hidden">
+        <div class="muted">Все шрифты, подключённые на странице через @font-face, — в папку «Загрузки/Site to Figma/…/fonts».</div>
+        <button class="primary scanf">Найти шрифты на странице</button>
+        <div class="fontsbox hidden">
+          <div class="medialist fontlist"></div>
+          <button class="primary savefonts">Скачать</button>
+        </div>
+        <div class="status fstatus"></div>
+      </div>
+    </div>
+    <div class="toast"></div>`;
   document.documentElement.appendChild(host);
 
   const $ = (s) => root.querySelector(s);
@@ -149,6 +189,96 @@ function createPanel() {
 
   let result = null;
   let busy = false;
+  let target = null;
+  let toastTimer = 0;
+
+  const toast = (text) => {
+    const el = $(".toast");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
+  };
+
+  // Capture stages from the pipeline progress messages, with a little creep between them.
+  const STAGES = [
+    ["Прокрутка", 10],
+    ["Снимки", 22],
+    ["SVG", 34],
+    ["Шрифты", 50],
+    ["Конвертация", 70],
+    ["Обработка", 88],
+  ];
+  let progressValue = 0;
+  let progressCap = 0;
+  let progressTimer = 0;
+  let progressHideTimer = 0;
+  const paintProgress = () => ($(".progress i").style.width = `${progressValue.toFixed(1)}%`);
+  const startProgress = () => {
+    clearInterval(progressTimer);
+    clearTimeout(progressHideTimer);
+    progressValue = 3;
+    progressCap = 8;
+    $(".progress").classList.remove("hidden");
+    paintProgress();
+    status("Подготовка…");
+    progressTimer = setInterval(() => {
+      if (progressValue >= progressCap - 0.15) return;
+      progressValue = Math.min(progressCap, progressValue + Math.max(0.2, (progressCap - progressValue) * 0.12));
+      paintProgress();
+    }, 140);
+  };
+  const stageProgress = (message) => {
+    const stage = STAGES.find(([prefix]) => message.startsWith(prefix));
+    if (stage) progressCap = Math.max(progressCap, stage[1]);
+    status(message);
+  };
+  const stopProgress = (value = 0) => {
+    clearInterval(progressTimer);
+    clearTimeout(progressHideTimer);
+    progressValue = value;
+    paintProgress();
+  };
+  const finishProgress = () => stopProgress(100);
+  const hideProgress = (delay = 900) => {
+    clearTimeout(progressHideTimer);
+    progressHideTimer = setTimeout(() => $(".progress").classList.add("hidden"), delay);
+  };
+
+  const updateTarget = () => {
+    $(".targetrow").classList.toggle("hidden", !target);
+    $(".targetname").textContent = target ? describe(target) : "";
+    $(".go").textContent = target ? "Захватить выбранный блок" : "Захватить страницу";
+  };
+
+  const updateHideBox = () => $(".hidebox").classList.toggle("hidden", !$(".exclude").checked);
+  $(".exclude").addEventListener("change", updateHideBox);
+  updateHideBox();
+
+  // Pick a block on the page. The panel is hidden while the picker overlay is active.
+  $(".pick").addEventListener("click", async () => {
+    if (busy) return;
+    host.style.display = "none";
+    await nextFrame();
+    let el = null;
+    try {
+      el = await pickElement();
+    } finally {
+      host.style.display = "";
+    }
+    if (el) {
+      target = el;
+      updateTarget();
+      const r = el.getBoundingClientRect();
+      status(`Выбран блок ${describe(el)} · ${Math.round(r.width)}×${Math.round(r.height)}`, "ok");
+    }
+  });
+
+  $(".clear").addEventListener("click", () => {
+    target = null;
+    updateTarget();
+    status("Будет захвачена вся страница");
+  });
 
   // Screenshot of the top of the page for the .fig thumbnail; the panel is hidden meanwhile.
   async function thumbnail() {
@@ -181,23 +311,43 @@ function createPanel() {
 
   $(".go").addEventListener("click", async () => {
     if (busy) return;
+    if (target && !target.isConnected) {
+      target = null;
+      updateTarget();
+    }
     busy = true;
     result = null;
     $(".go").disabled = true;
     $(".result").classList.add("hidden");
+    startProgress();
     const t0 = Date.now();
     try {
       result = await capture(
-        { layout: $(".abs").checked ? "absolute" : "auto", hideSelectors: $(".hide").value },
-        { net, thumbnail, captureViewport, bundledFont, progress: (m) => status(m) }
+        { layout: $(".abs").checked ? "absolute" : "auto", hideSelectors: $(".exclude").checked ? $(".hide").value : "", target: target || undefined },
+        { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
       );
+      finishProgress();
       console.info("site2figma: capture", JSON.stringify(result.debug.fixes), "fonts", JSON.stringify(result.debug.fonts));
       const notes = result.log.length ? " " + result.log.join(" ") : "";
-      status(`Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.${notes}`, "ok");
+      const summary = `Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.`;
       $(".result").classList.remove("hidden");
       renderSvgList();
+      status(`${summary} Копирую в буфер…`, "ok");
+      const copied = await copyHtml(result.clipboardHtml).catch(() => false);
+      if (copied) {
+        status(`${summary} Скопировано в буфер — Ctrl+V в Figma.${notes}`, "ok");
+        toast("Скопировано в буфер обмена — Ctrl+V в Figma");
+        $(".copy").textContent = "Скопировано — Ctrl+V в Figma";
+        setTimeout(() => ($(".copy").textContent = "Копировать для вставки в Figma"), 3200);
+      } else {
+        status(`${summary}${notes}`, "ok");
+        toast("Не удалось скопировать автоматически — нажмите «Копировать для вставки в Figma»");
+      }
+      hideProgress(1200);
     } catch (e) {
       console.error("site2figma", e);
+      stopProgress(0);
+      $(".progress").classList.add("hidden");
       status("Ошибка: " + (e.message || e), "err");
     } finally {
       busy = false;
@@ -231,6 +381,15 @@ function createPanel() {
     return ok;
   };
 
+  // Auto-copy after capture has no click gesture, so try the async Clipboard API first.
+  const copyHtml = async (html) => {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }) })]);
+      return true;
+    } catch {}
+    return copyText(html, "text/html");
+  };
+
   // SVGs kept as images: one "copy code" button each, for paste-to-replace in Figma.
   function renderSvgList() {
     const list = $(".svglist");
@@ -256,10 +415,11 @@ function createPanel() {
     }
   }
 
-  $(".copy").addEventListener("click", () => {
+  $(".copy").addEventListener("click", async () => {
     if (!result) return;
-    const ok = copyText(result.clipboardHtml, "text/html");
+    const ok = await copyHtml(result.clipboardHtml);
     $(".copy").textContent = ok ? "Скопировано — Ctrl+V в Figma" : "Не удалось скопировать";
+    if (ok) toast("Скопировано в буфер обмена — Ctrl+V в Figma");
     setTimeout(() => ($(".copy").textContent = "Копировать для вставки в Figma"), 2500);
   });
 
@@ -270,6 +430,13 @@ function createPanel() {
       for (const t of root.querySelectorAll(".tab")) t.classList.toggle("hidden", !t.classList.contains("tab-" + btn.dataset.tab));
     });
   }
+
+  const cleanFileName = (s) => s.replace(/[\\/:*?"<>|~]+/g, "_").replace(/^[.\s]+|[.\s]+$/g, "").slice(0, 120) || "file";
+  const downloadsFolder = () => {
+    const d = new Date();
+    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}-${String(d.getMinutes()).padStart(2, "0")}`;
+    return `Site to Figma/${cleanFileName(location.hostname || "page")} ${stamp}`;
+  };
 
   // ---- Media tab ----
   let media = [];
@@ -359,10 +526,7 @@ function createPanel() {
     if (!items.length || busy) return;
     busy = true;
     $(".save").disabled = true;
-    const clean = (s) => s.replace(/[\\/:*?"<>|~]+/g, "_").replace(/^[.\s]+|[.\s]+$/g, "").slice(0, 120) || "file";
-    const d = new Date();
-    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}-${String(d.getMinutes()).padStart(2, "0")}`;
-    const folder = `Site to Figma/${clean(location.hostname || "page")} ${stamp}`;
+    const folder = downloadsFolder();
     const sub = { image: "images", svg: "svg", video: "video" };
     let done = 0;
     let failed = 0;
@@ -370,7 +534,7 @@ function createPanel() {
     const worker = async () => {
       for (let item; (item = queue.shift()); ) {
         const url = item.url || "data:image/svg+xml;charset=utf-8," + encodeURIComponent(item.text);
-        const r = await send({ type: "download", url, path: `${folder}/${sub[item.kind]}/${clean(item.name)}` }).catch((e) => ({ error: e.message }));
+        const r = await send({ type: "download", url, path: `${folder}/${sub[item.kind]}/${cleanFileName(item.name)}` }).catch((e) => ({ error: e.message }));
         if (r?.error) failed++;
         else done++;
         mstatus(`Скачивается: ${done + failed} из ${items.length}…`);
@@ -380,6 +544,92 @@ function createPanel() {
     mstatus(`Готово: ${done} файлов в «Загрузки/${folder}».` + (failed ? ` Не удалось: ${failed}.` : ""), failed ? "err" : "ok");
     busy = false;
     updateSaveButton();
+  });
+
+  // ---- Fonts tab ----
+  let fontFiles = [];
+  const fstatus = (text, cls = "") => {
+    $(".fstatus").className = "status fstatus " + cls;
+    $(".fstatus").textContent = text;
+  };
+  const selectedFonts = () => fontFiles.filter((f) => f.checked);
+  const updateSaveFonts = () => {
+    const n = selectedFonts().length;
+    $(".savefonts").textContent = n ? `Скачать выбранное (${n})` : "Ничего не выбрано";
+    $(".savefonts").disabled = !n || busy;
+  };
+
+  function renderFonts() {
+    const list = $(".fontlist");
+    list.textContent = "";
+    for (const item of fontFiles) {
+      const row = document.createElement("label");
+      row.className = "mediarow";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = item.checked;
+      cb.addEventListener("change", () => {
+        item.checked = cb.checked;
+        updateSaveFonts();
+      });
+      const preview = document.createElement("span");
+      preview.className = "fontpreview";
+      preview.textContent = "Aa";
+      preview.style.fontFamily = `"${item.family}"`;
+      const info = document.createElement("div");
+      info.className = "medianame";
+      info.textContent = item.family;
+      info.title = `${item.family} · ${item.name}\n${item.url}`;
+      const meta = document.createElement("div");
+      meta.className = "mediameta";
+      meta.textContent = [item.weight, item.style, item.format, item.name].filter(Boolean).join(" · ");
+      info.append(meta);
+      row.append(cb, preview, info);
+      list.append(row);
+    }
+    updateSaveFonts();
+  }
+
+  $(".scanf").addEventListener("click", async () => {
+    if (busy) return;
+    busy = true;
+    $(".scanf").disabled = true;
+    try {
+      fstatus("Ищу шрифты на странице…");
+      fontFiles = (await scanFonts(net)).map((f) => ({ ...f, checked: true }));
+      $(".fontsbox").classList.remove("hidden");
+      fstatus(fontFiles.length ? `Найдено файлов: ${fontFiles.length}` : "Шрифты не найдены", fontFiles.length ? "ok" : "");
+      renderFonts();
+    } catch (e) {
+      fstatus("Ошибка: " + (e.message || e), "err");
+    } finally {
+      busy = false;
+      $(".scanf").disabled = false;
+      updateSaveFonts();
+    }
+  });
+
+  $(".savefonts").addEventListener("click", async () => {
+    const items = selectedFonts();
+    if (!items.length || busy) return;
+    busy = true;
+    $(".savefonts").disabled = true;
+    const folder = downloadsFolder() + "/fonts";
+    let done = 0;
+    let failed = 0;
+    const queue = [...items];
+    const worker = async () => {
+      for (let item; (item = queue.shift()); ) {
+        const r = await send({ type: "download", url: item.url, path: `${folder}/${cleanFileName(item.name)}` }).catch((e) => ({ error: e.message }));
+        if (r?.error) failed++;
+        else done++;
+        fstatus(`Скачивается: ${done + failed} из ${items.length}…`);
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    fstatus(`Готово: ${done} файлов в «Загрузки/${folder}».` + (failed ? ` Не удалось: ${failed}.` : ""), failed ? "err" : "ok");
+    busy = false;
+    updateSaveFonts();
   });
 
   // Toolbar click shows a hidden panel or hides a visible one (never mid-capture).

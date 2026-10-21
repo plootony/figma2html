@@ -58,6 +58,10 @@
       <summary>Убрать элементы перед захватом (cookie-баннеры, чаты…)</summary>
       <input id="hide" type="text" placeholder="CSS-селекторы через запятую, например: #cookie-banner, .chat-widget">
     </details>
+    <details>
+      <summary>Захватить только один блок</summary>
+      <input id="target" type="text" placeholder="CSS-селектор блока, например: #hero или main .card">
+    </details>
     <div id="status"></div>
   </div>
 
@@ -165,7 +169,7 @@ $("#f").onsubmit = async (e) => {
     const r = await fetch("/capture", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, widths, layout: $("#abs").checked ? "absolute" : "auto", hideSelectors: $("#hide").value }),
+      body: JSON.stringify({ url, widths, layout: $("#abs").checked ? "absolute" : "auto", hideSelectors: $("#hide").value, targetSelector: $("#target").value.trim() }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);

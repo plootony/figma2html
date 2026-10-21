@@ -4,9 +4,9 @@ import { capture, createStyleJournal, materializePseudoElements } from "./core/p
 import { prepareSvgImages, resolveSvgUses } from "./core/svg.js";
 import { base64ToBytes, bytesToBase64 } from "./core/bytes.js";
 
-window.__s2fCapture = async ({ layout, hideSelectors, thumbnailB64, withTrace }) => {
+window.__s2fCapture = async ({ layout, hideSelectors, targetSelector, thumbnailB64, withTrace }) => {
   const res = await capture(
-    { layout, hideSelectors, scroll: false, freezeAnimations: false, keepModified: withTrace }, // Node already froze and scrolled
+    { layout, hideSelectors, targetSelector, scroll: false, freezeAnimations: false, keepModified: withTrace }, // Node already froze and scrolled
     {
       net: {
         text: async (url) => {
