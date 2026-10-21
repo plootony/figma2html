@@ -1,5 +1,5 @@
 // Element picker for the content script: hover highlights a block, click selects it,
-// Shift+click adds more blocks, ↑ climbs to the parent, Esc cancels. Breadcrumbs at the top
+// Shift/Ctrl/Cmd+click adds more blocks, ↑ climbs to the parent, Esc cancels. Breadcrumbs at the top
 // let you pick an ancestor directly. The overlay lives outside <body> so the capture
 // never sees it.
 
@@ -39,16 +39,22 @@ export function pickElements() {
       .tip { position: fixed; display: none; padding: 4px 8px; border-radius: 6px; background: #1f1f1d; color: #ececea;
         font: 12px/1.4 system-ui, sans-serif; box-shadow: 0 4px 14px rgba(0,0,0,.35); white-space: nowrap; pointer-events: none; }
       .tip b { font-weight: 600; }
+      .finish { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); pointer-events: auto;
+        padding: 9px 18px; border: 0; border-radius: 999px; background: #4d8dff; color: #fff; cursor: pointer;
+        font: 600 13px/1.4 system-ui, sans-serif; box-shadow: 0 8px 26px rgba(0,0,0,.35); }
+      .finish:disabled { opacity: .55; cursor: default; }
     </style>
     <div class="crumbs"></div>
     <div class="box"></div>
     <div class="selected"></div>
-    <div class="tip"><b></b></div>`;
+    <div class="tip"><b></b></div>
+    <button class="finish" type="button" disabled>Завершить выбор</button>`;
     document.documentElement.appendChild(host);
 
     const box = root.querySelector(".box");
     const tip = root.querySelector(".tip");
     const tipName = root.querySelector(".tip b");
+    const finishBtn = root.querySelector(".finish");
     const crumbs = root.querySelector(".crumbs");
     const selectedLayer = root.querySelector(".selected");
     const picked = [];
@@ -61,6 +67,7 @@ export function pickElements() {
 
     const normalize = (el) => (el === document.documentElement ? document.body : el);
     const sameOrInside = (child, parent) => child === parent || parent.contains(child);
+    const additive = (e) => e.shiftKey || e.ctrlKey || e.metaKey;
     const elementAt = (e) => {
       const el = document.elementFromPoint(e.clientX, e.clientY);
       if (!el || el.closest?.("#site2figma-panel, #site2figma-picker")) return null;
@@ -77,6 +84,11 @@ export function pickElements() {
         Object.assign(mark.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
         selectedLayer.append(mark);
       }
+    };
+
+    const updateFinish = () => {
+      finishBtn.textContent = picked.length ? `Завершить выбор (${picked.length})` : "Завершить выбор";
+      finishBtn.disabled = !picked.length;
     };
 
     const drawCrumbs = () => {
@@ -109,7 +121,7 @@ export function pickElements() {
         btn.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (e.shiftKey) {
+          if (additive(e)) {
             toggle(el);
             draw(el);
           } else {
@@ -126,7 +138,7 @@ export function pickElements() {
       }
       const hint = document.createElement("span");
       hint.className = "hint";
-      hint.textContent = "Shift+клик — ещё · ↑ — выше · Esc — отмена";
+      hint.textContent = "Ctrl/Shift+клик — ещё · ↑ — выше · Esc — отмена";
       crumbs.append(hint);
     };
 
@@ -162,6 +174,7 @@ export function pickElements() {
       }
       drawSelected();
       drawCrumbs();
+      updateFinish();
     };
 
     const finish = (els) => {
@@ -196,7 +209,7 @@ export function pickElements() {
       e.stopImmediatePropagation();
       const el = current || elementAt(e);
       if (!el) return;
-      if (e.shiftKey) {
+      if (additive(e)) {
         toggle(el);
         draw(el);
       } else {
@@ -226,6 +239,14 @@ export function pickElements() {
       if (prevCursor) document.documentElement.style.setProperty("cursor", prevCursor, prevPriority);
       else document.documentElement.style.removeProperty("cursor");
     };
+
+    finishBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    finishBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (picked.length) finish(picked);
+    });
+    updateFinish();
 
     document.addEventListener("mousemove", onMove, true);
     document.addEventListener("pointerdown", onDown, true);

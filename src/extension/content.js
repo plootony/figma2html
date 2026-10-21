@@ -17,27 +17,32 @@ function send(msg) {
 // Stable selector for saving the chosen blocks between panel openings.
 function cssPath(el) {
   if (!el || el.nodeType !== 1) return "";
-  const parts = [];
-  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-    if (node === document.documentElement) {
-      parts.unshift("html");
-      break;
+  const escapeId = (id) => (globalThis.CSS?.escape ? CSS.escape(id) : id.replace(/([^\w-])/g, "\\$1"));
+  try {
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      if (node === document.documentElement) {
+        parts.unshift("html");
+        break;
+      }
+      if (node.id) {
+        parts.unshift(`#${escapeId(node.id)}`);
+        break;
+      }
+      const tag = node.tagName.toLowerCase();
+      const parent = node.parentElement;
+      if (!parent) {
+        parts.unshift(tag);
+        break;
+      }
+      const same = [...parent.children].filter((c) => c.tagName === node.tagName);
+      parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(node) + 1})` : tag);
+      if (node === document.body) break;
     }
-    if (node.id) {
-      parts.unshift(`#${CSS.escape(node.id)}`);
-      break;
-    }
-    const tag = node.tagName.toLowerCase();
-    const parent = node.parentElement;
-    if (!parent) {
-      parts.unshift(tag);
-      break;
-    }
-    const same = [...parent.children].filter((c) => c.tagName === node.tagName);
-    parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(node) + 1})` : tag);
-    if (node === document.body) break;
+    return parts.join(" > ");
+  } catch {
+    return "";
   }
-  return parts.join(" > ");
 }
 
 const net = {
@@ -94,8 +99,14 @@ button:disabled { opacity: .5; cursor: default; }
 .medianame { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mediameta { color: #9a9a94; font-size: 11px; }
 button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36; background: transparent; color: #4d8dff; font: inherit; cursor: pointer; }
-.targetrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.targetname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #4d8dff; font-size: 12px; }
+.targetrow { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+.targetinfo { flex: 1; min-width: 0; }
+.targetname { display: block; color: #4d8dff; font-size: 12px; }
+.targettags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tag { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 6px; border-radius: 6px; background: #2c2c29; color: #ececea; font-size: 11px; }
+.tag span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag button { flex: none; border: 0; background: transparent; color: #9a9a94; font: inherit; line-height: 1; cursor: pointer; padding: 0 1px; }
+.tag button:hover { color: #ff6b6b; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 12px); z-index: 2147483647;
   background: #1f1f1d; color: #ececea; border: 1px solid #3a3a36; border-radius: 10px; padding: 10px 16px;
   font: 600 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; box-shadow: 0 8px 30px rgba(0,0,0,.35);
@@ -114,6 +125,11 @@ button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36;
 .advanced summary::before { content: "▸"; color: #4d8dff; }
 .advanced[open] summary::before { content: "▾"; }
 .advanced-body { padding-top: 2px; }
+.advanced.has-settings summary { color: #ececea; }
+.advbadge { margin-left: 6px; min-width: 16px; padding: 0 5px; border-radius: 9px; background: #4d8dff;
+  color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; }
+.advbadge.hidden { display: none; }
+.advreset { margin: 2px 0 4px; }
 .diag { margin-top: 10px; border-top: 1px solid #3a3a36; padding-top: 8px; font-size: 12px; }
 .diag summary { cursor: pointer; color: #ffb454; }
 .diaglist { max-height: 180px; overflow: auto; margin-top: 6px; color: #9a9a94; }
@@ -174,10 +190,14 @@ function createPanel() {
       <div class="tab tab-figma">
       <div class="muted width"></div>
       <button class="secondary pick">Выбрать блок на странице</button>
-      <div class="targetrow hidden"><span class="targetname"></span><button class="small clear">Сбросить</button></div>
+      <div class="targetrow hidden">
+        <div class="targetinfo"><span class="targetname"></span><div class="targettags"></div></div>
+        <button class="small clear">Сбросить</button>
+      </div>
       <details class="advanced">
-        <summary>Дополнительные настройки</summary>
+        <summary>Дополнительные настройки <span class="advbadge hidden"></span></summary>
         <div class="advanced-body">
+          <button class="small advreset" type="button">Сбросить настройки</button>
           <label><input type="checkbox" class="abs"> Без auto layout</label>
           <label><input type="checkbox" class="exclude"> Исключить блоки</label>
           <label><input type="checkbox" class="visible"> Только видимая часть страницы</label>
@@ -366,26 +386,93 @@ function createPanel() {
 
   const updateTarget = () => {
     $(".targetrow").classList.toggle("hidden", !targets.length);
-    $(".targetname").textContent = targets.length === 1 ? describe(targets[0]) : targets.length ? `${targets.length} блока: ${targets.map(describe).join(", ")}` : "";
+    $(".targetname").textContent = targets.length ? (targets.length === 1 ? "Выбранный блок:" : `Выбранные блоки (${targets.length}):`) : "";
     $(".go").textContent = targets.length ? "Захватить выбранные блоки" : "Захватить всю страницу";
+    const tags = $(".targettags");
+    tags.textContent = "";
+    targets.forEach((el, index) => {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      const name = document.createElement("span");
+      name.textContent = describe(el);
+      name.title = cssPath(el);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = "Убрать блок из выбора";
+      remove.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (busy) return;
+        targets.splice(index, 1);
+        updateTarget();
+        saveSettings();
+        status(targets.length ? "Блок убран из выбора" : "Будет захвачена вся страница");
+      });
+      tag.append(name, remove);
+      tags.append(tag);
+    });
+  };
+
+  const updateAdvancedBadge = () => {
+    const active = [];
+    if ($(".abs").checked) active.push("Без auto layout");
+    if ($(".exclude").checked) active.push("Исключить блоки");
+    if ($(".visible").checked) active.push("Только видимая часть страницы");
+    if ($(".logging").checked) active.push("Логирование");
+    const widths = [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => i.dataset.width);
+    if (widths.length) active.push(`Ширины: ${widths.join(", ")}`);
+    const custom = $(".widthcustom").value.trim();
+    if (custom) active.push(`Своя ширина: ${custom}`);
+    const badge = $(".advbadge");
+    badge.textContent = active.length ? String(active.length) : "";
+    badge.classList.toggle("hidden", !active.length);
+    badge.title = active.join("\n");
+    $("details.advanced").classList.toggle("has-settings", active.length > 0);
   };
 
   const updateHideBox = () => $(".hidebox").classList.toggle("hidden", !$(".exclude").checked);
   $(".exclude").addEventListener("change", () => {
     updateHideBox();
     saveSettings();
+    updateAdvancedBadge();
   });
-  $(".abs").addEventListener("change", saveSettings);
-  $(".visible").addEventListener("change", saveSettings);
+  $(".abs").addEventListener("change", () => {
+    saveSettings();
+    updateAdvancedBadge();
+  });
+  $(".visible").addEventListener("change", () => {
+    saveSettings();
+    updateAdvancedBadge();
+  });
   $(".logging").addEventListener("change", () => {
     updateLogVisibility();
     saveSettings();
+    updateAdvancedBadge();
     if ($(".logging").checked) addLog("Логирование включено");
   });
-  $(".widthlist").addEventListener("change", saveSettings);
-  $(".widthcustom").addEventListener("input", saveSettings);
+  $(".widthlist").addEventListener("change", () => {
+    saveSettings();
+    updateAdvancedBadge();
+  });
+  $(".widthcustom").addEventListener("input", () => {
+    saveSettings();
+    updateAdvancedBadge();
+  });
   $(".hide").addEventListener("input", saveSettings);
+  $(".advreset").addEventListener("click", () => {
+    for (const sel of [".abs", ".exclude", ".visible", ".logging"]) $(sel).checked = false;
+    for (const input of root.querySelectorAll(".widths input[data-width]")) input.checked = false;
+    $(".widthcustom").value = "";
+    $(".hide").value = "";
+    updateHideBox();
+    updateLogVisibility();
+    updateAdvancedBadge();
+    saveSettings();
+    status("Дополнительные настройки сброшены");
+  });
   updateHideBox();
+  updateAdvancedBadge();
 
   function renderWidths(selected = []) {
     const list = $(".widthlist");
@@ -396,6 +483,7 @@ function createPanel() {
       empty.className = "muted";
       empty.textContent = "не найдены";
       list.append(empty);
+      updateAdvancedBadge();
       return;
     }
     for (const width of detectedWidths) {
@@ -407,6 +495,7 @@ function createPanel() {
       label.append(cb, document.createTextNode(` ${width}`));
       list.append(label);
     }
+    updateAdvancedBadge();
   }
 
   async function scanCssWidths() {
@@ -476,6 +565,7 @@ function createPanel() {
         updateTarget();
       }
     }
+    updateAdvancedBadge();
   }).catch(() => {});
 
   // Pick a block on the page. The panel is hidden while the picker overlay is active.
