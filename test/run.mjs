@@ -75,6 +75,13 @@ try {
   const infoImage = infoFrame && infoMsg.nodeChanges.some((n) => n.parentIndex?.guid.sessionID === infoFrame.guid.sessionID && n.parentIndex?.guid.localID === infoFrame.guid.localID && n.fillPaints?.some((p) => p.type === "IMAGE"));
   check("additional info is rendered as an image", Boolean(infoImage));
 
+  const tokenResult = await capturePage({ url, width: 1200, designTokens: true });
+  const tokenMsg = decode(tokenResult.clipboardHtml);
+  const tokenFrame = rootFrames(tokenMsg).find((n) => n.name === "Токены дизайна");
+  check("design tokens frame is added", Boolean(tokenFrame));
+  const tokenImage = tokenFrame && tokenMsg.nodeChanges.some((n) => n.parentIndex?.guid.sessionID === tokenFrame.guid.sessionID && n.parentIndex?.guid.localID === tokenFrame.guid.localID && n.fillPaints?.some((p) => p.type === "IMAGE"));
+  check("design tokens are rendered as an image", Boolean(tokenImage));
+
   const multi = await capturePage({ url, width: 1200, targetSelectors: ["#hero", "#cards"] });
   const multiMsg = decode(multi.clipboardHtml);
   const roots = rootFrames(multiMsg);

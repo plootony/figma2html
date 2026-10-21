@@ -99,7 +99,7 @@ const FREEZE_CSS = `*,*::before,*::after{animation-duration:0s!important;animati
  * Capture a page. Returns { name, height, fig (Buffer), clipboardHtml, nodes, images, log, debug, trace? }.
  * `inspect(page, trace)` (optional, verify.mjs) runs on the live page after the capture.
  */
-export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", targetSelectors = [], extraInfo = false, inspect }) {
+export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", targetSelectors = [], extraInfo = false, designTokens = false, inspect }) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   const log = [];
@@ -163,6 +163,7 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
           hideSelectors,
           targetSelectors: selectors,
           extraInfo,
+          designTokens,
           thumbnailB64: Buffer.from(thumbnail).toString("base64"),
           withTrace: Boolean(inspect),
         });

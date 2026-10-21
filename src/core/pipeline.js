@@ -553,10 +553,188 @@ async function createInfoImage({ title, sections }) {
   return { dataUrl, width: WIDTH, height };
 }
 
+
+const fmtPx = (n) => `${Math.round(n * 10) / 10}px`;
+const hexColor = (css) => {
+  const m = /^rgba?\(([^)]+)\)$/i.exec((css || "").trim());
+  if (!m) return null;
+  const p = m[1].split(/[,/ ]+/).filter(Boolean).map(Number);
+  if (p.length < 3 || p.some((v) => !Number.isFinite(v))) return null;
+  const a = p[3] ?? 1;
+  if (a <= 0) return null;
+  const h = (v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0");
+  return `#${h(p[0])}${h(p[1])}${h(p[2])}${a < 1 ? h(a * 255) : ""}`.toUpperCase();
+};
+
+function collectTokens(roots) {
+  const colors = new Map();
+  const typography = new Map();
+  const spacing = new Map();
+  const radii = new Map();
+  const shadows = new Map();
+  const bump = (map, key, amount = 1) => map.set(key, (map.get(key) || 0) + amount);
+  const addSpacing = (value) => {
+    const n = parseFloat(value);
+    if (Number.isFinite(n) && n > 0) bump(spacing, fmtPx(n));
+  };
+  const addColor = (value) => {
+    const hex = hexColor(value);
+    if (hex) bump(colors, hex);
+  };
+  for (const root of roots) {
+    for (const el of [root, ...root.querySelectorAll("*")]) {
+      const cs = getComputedStyle(el);
+      addColor(cs.color);
+      addColor(cs.backgroundColor);
+      for (const side of ["Top", "Right", "Bottom", "Left"]) {
+        if (parseFloat(cs[`border${side}Width`]) > 0) addColor(cs[`border${side}Color`]);
+      }
+      for (const prop of ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "marginTop", "marginRight", "marginBottom", "marginLeft", "rowGap", "columnGap"]) addSpacing(cs[prop]);
+      for (const prop of ["borderTopLeftRadius", "borderTopRightRadius", "borderBottomRightRadius", "borderBottomLeftRadius"]) {
+        const n = parseFloat(cs[prop]);
+        if (n > 0) bump(radii, fmtPx(n));
+      }
+      if (cs.boxShadow && cs.boxShadow !== "none") bump(shadows, cs.boxShadow.replace(/\s+/g, " ").trim());
+    }
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.textContent.trim()) continue;
+      const el = node.parentElement;
+      if (!el) continue;
+      const cs = getComputedStyle(el);
+      const family = cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
+      const size = Math.round(parseFloat(cs.fontSize) * 10) / 10;
+      const weight = cs.fontWeight;
+      const lineHeight = cs.lineHeight === "normal" ? Math.round(size * 12) / 10 : Math.round(parseFloat(cs.lineHeight) * 10) / 10;
+      if (family && size > 0) bump(typography, `${family}|${size}|${weight}|${lineHeight}`);
+    }
+  }
+  const top = (map, count) => [...map].sort((a, b) => b[1] - a[1]).slice(0, count);
+  return {
+    colors: top(colors, 16).map(([hex, count]) => ({ hex, count })),
+    typography: top(typography, 12).map(([key, count]) => {
+      const [family, size, weight, lineHeight] = key.split("|");
+      return { family, size: Number(size), weight, lineHeight: Number(lineHeight), count };
+    }),
+    spacing: top(spacing, 10).map(([label, count]) => ({ label, value: parseFloat(label), count })),
+    radii: top(radii, 8).map(([label, count]) => ({ label, value: parseFloat(label), count })),
+    shadows: top(shadows, 6).map(([value, count]) => ({ value, count })),
+  };
+}
+
+async function createTokensImage({ url, tokens }) {
+  const WIDTH = 420;
+  const PAD = 24;
+  const SCALE = 2;
+  const bodyFamily = getComputedStyle(document.body).fontFamily;
+  const canvas = new OffscreenCanvas(WIDTH * SCALE, 3200 * SCALE);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, WIDTH, 3200);
+  const text = (value, x, y, size, weight, color, family = bodyFamily, baseline = "top") => {
+    ctx.font = `${weight} ${size}px ${family}`;
+    ctx.fillStyle = color;
+    ctx.textBaseline = baseline;
+    ctx.fillText(value, x, y);
+  };
+  let y = PAD;
+  text("SITE TO FIGMA / DESIGN TOKENS", PAD, y, 16, 700, "#111111");
+  y += 24;
+  text(`URL: ${url.slice(0, 76)}`, PAD, y, 10, 400, "#777777");
+  y += 18;
+  const section = (label) => {
+    y += 14;
+    text(label, PAD, y, 11, 700, "#777777");
+    y += 17;
+  };
+
+  section("COLORS");
+  for (let i = 0; i < tokens.colors.length; i += 2) {
+    const row = tokens.colors.slice(i, i + 2);
+    row.forEach((color, column) => {
+      const x = PAD + column * 188;
+      ctx.fillStyle = color.hex;
+      ctx.fillRect(x, y, 18, 18);
+      ctx.strokeStyle = "#dddddd";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, 17, 17);
+      text(`${color.hex} (${color.count})`, x + 25, y + 4, 10, 400, "#111111");
+    });
+    y += 24;
+  }
+
+  section("TYPOGRAPHY");
+  for (const item of tokens.typography) {
+    const sample = Math.min(26, Math.max(10, item.size));
+    const rowHeight = Math.max(30, sample * 1.25 + 4);
+    text("Aa", PAD, y + rowHeight - 6, sample, item.weight, "#111111", item.family, "alphabetic");
+    text(`${item.family} ${item.size}/${item.lineHeight} ${item.weight} (${item.count})`, PAD + 52, y + 8, 10, 400, "#111111");
+    y += rowHeight;
+  }
+
+  section("SPACING");
+  for (const item of tokens.spacing) {
+    const width = Math.min(180, Math.max(4, item.value));
+    ctx.fillStyle = "#9a9a94";
+    ctx.fillRect(PAD, y + 5, width, 6);
+    text(`${item.label} (${item.count})`, PAD + 190, y + 2, 10, 400, "#111111");
+    y += 18;
+  }
+
+  section("RADII");
+  for (const item of tokens.radii) {
+    const radius = Math.min(14, item.value);
+    ctx.beginPath();
+    ctx.roundRect(PAD, y, 28, 28, radius);
+    ctx.fillStyle = "#f0f0ee";
+    ctx.fill();
+    ctx.strokeStyle = "#999999";
+    ctx.stroke();
+    text(`${item.label} (${item.count})`, PAD + 38, y + 8, 10, 400, "#111111");
+    y += 34;
+  }
+
+  section("SHADOWS");
+  for (const item of tokens.shadows) {
+    const parts = [...item.value.matchAll(/(-?[\d.]+)px/g)].map((match) => parseFloat(match[1]));
+    ctx.save();
+    ctx.shadowColor = (item.value.match(/(rgba?\([^)]+\)|#[0-9a-f]{3,8}|\b[a-z]+\b)/i) || ["rgba(0,0,0,.2)"])[0];
+    ctx.shadowOffsetX = parts[0] || 0;
+    ctx.shadowOffsetY = parts[1] || 0;
+    ctx.shadowBlur = parts[2] || 8;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(PAD, y + 2, 84, 26);
+    ctx.restore();
+    ctx.strokeStyle = "#dddddd";
+    ctx.strokeRect(PAD + 0.5, y + 2.5, 83, 25);
+    text(item.value.length > 54 ? item.value.slice(0, 54) + "..." : item.value, PAD + 94, y + 8, 9, 400, "#111111");
+    y += 38;
+  }
+
+  const height = Math.ceil(y + PAD);
+  const out = new OffscreenCanvas(WIDTH * SCALE, height * SCALE);
+  const outCtx = out.getContext("2d");
+  outCtx.drawImage(canvas, 0, 0, WIDTH * SCALE, height * SCALE, 0, 0, WIDTH * SCALE, height * SCALE);
+  outCtx.strokeStyle = "#dddddd";
+  outCtx.lineWidth = 2;
+  outCtx.strokeRect(1, 1, WIDTH * SCALE - 2, height * SCALE - 2);
+  const blob = await out.convertToBlob({ type: "image/png" });
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+  return { dataUrl, width: WIDTH, height };
+}
+
+
 export async function capture(options, env) {
   // keepModified: leave the prepared DOM in place (verify.mjs inspects it); call the
   // returned `restore()` afterwards.
-  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false, extraInfo = false } = options;
+  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false, extraInfo = false, designTokens = false } = options;
   const progress = env.progress || (() => {});
   const cancel = () => {
     if (!options.shouldCancel?.()) return;
@@ -711,6 +889,17 @@ export async function capture(options, env) {
       document.documentElement.appendChild(image);
       journal.add(image);
       frames = [...mainFrames, { element: image, width: info.width, height: info.height, name: "Доп. информация" }];
+    }
+    if (designTokens) {
+      const tokens = await createTokensImage({ url: location.href, tokens: collectTokens(roots) });
+      const image = document.createElement("img");
+      image.src = tokens.dataUrl;
+      image.width = tokens.width;
+      image.height = tokens.height;
+      Object.assign(image.style, { position: "fixed", left: "-20000px", top: "0", width: `${tokens.width}px`, height: `${tokens.height}px` });
+      document.documentElement.appendChild(image);
+      journal.add(image);
+      frames = [...frames, { element: image, width: tokens.width, height: tokens.height, name: "Токены дизайна" }];
     }
     const GAP = 80;
     let offsetX = 0;

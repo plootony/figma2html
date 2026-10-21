@@ -222,6 +222,7 @@ function createPanel() {
           <label><input type="checkbox" class="exclude"> Исключить блоки</label>
           <label><input type="checkbox" class="logging"> Логирование</label>
           <label><input type="checkbox" class="extrainfo"> Доп. информация</label>
+          <label><input type="checkbox" class="tokens"> Токены дизайна</label>
           <div class="muted">Ширины из CSS (медиа-запросы): <span class="widthcount"></span><button class="small widthscan">Найти</button></div>
           <div class="kinds widths widthlist"></div>
           <label>Своя: <input type="number" class="widthcustom" min="200" max="4000" step="1" placeholder="1280"> px</label>
@@ -319,6 +320,7 @@ function createPanel() {
           exclude: $(".exclude").checked,
           logging: $(".logging").checked,
           extraInfo: $(".extrainfo").checked,
+          designTokens: $(".tokens").checked,
           widths: [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => Number(i.dataset.width)),
           detectedWidths,
           customWidth: $(".widthcustom").value,
@@ -440,6 +442,7 @@ function createPanel() {
     if ($(".exclude").checked) active.push("Исключить блоки");
     if ($(".logging").checked) active.push("Логирование");
     if ($(".extrainfo").checked) active.push("Доп. информация");
+    if ($(".tokens").checked) active.push("Токены дизайна");
     const widths = [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => i.dataset.width);
     if (widths.length) active.push(`Ширины: ${widths.join(", ")}`);
     const custom = $(".widthcustom").value.trim();
@@ -471,6 +474,10 @@ function createPanel() {
     saveSettings();
     updateAdvancedBadge();
   });
+  $(".tokens").addEventListener("change", () => {
+    saveSettings();
+    updateAdvancedBadge();
+  });
   $(".widthlist").addEventListener("change", () => {
     saveSettings();
     updateAdvancedBadge();
@@ -481,7 +488,7 @@ function createPanel() {
   });
   $(".hide").addEventListener("input", saveSettings);
   $(".advreset").addEventListener("click", () => {
-    for (const sel of [".abs", ".exclude", ".logging", ".extrainfo"]) $(sel).checked = false;
+    for (const sel of [".abs", ".exclude", ".logging", ".extrainfo", ".tokens"]) $(sel).checked = false;
     for (const input of root.querySelectorAll(".widths input[data-width]")) input.checked = false;
     $(".widthcustom").value = "";
     $(".hide").value = "";
@@ -561,6 +568,7 @@ function createPanel() {
     $(".exclude").checked = Boolean(saved.exclude);
     $(".logging").checked = Boolean(saved.logging);
     $(".extrainfo").checked = Boolean(saved.extraInfo);
+    $(".tokens").checked = Boolean(saved.designTokens);
     updateLogVisibility();
     if ($(".logging").checked) addLog("Логирование включено");
     detectedWidths = Array.isArray(saved.detectedWidths) ? saved.detectedWidths : Array.isArray(saved.widths) ? saved.widths : [];
@@ -703,6 +711,7 @@ function createPanel() {
               hideSelectors: $(".exclude").checked ? $(".hide").value : "",
               targets: targets.length ? targets : undefined,
               extraInfo: $(".extrainfo").checked,
+              designTokens: $(".tokens").checked,
               shouldCancel: () => cancelRequested,
             },
             { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
@@ -778,6 +787,7 @@ function createPanel() {
             hideSelectors: $(".exclude").checked ? $(".hide").value : "",
             targets: targets.length ? targets : undefined,
             extraInfo: $(".extrainfo").checked,
+            designTokens: $(".tokens").checked,
             shouldCancel: () => cancelRequested,
           },
           { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
