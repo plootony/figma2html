@@ -19,40 +19,64 @@ async function sendToTab(tab, type) {
   await chrome.action.setTitle({ tabId: tab.id, title: "Site to Figma — захватить страницу" });
 }
 
-const windowStates = new Map();
+const debuggerTabs = new Set();
+const tabZooms = new Map();
+chrome.debugger?.onDetach.addListener((source) => {
+  debuggerTabs.delete(source.tabId);
+  const zoom = tabZooms.get(source.tabId);
+  tabZooms.delete(source.tabId);
+  if (zoom != null) chrome.tabs.setZoom(source.tabId, zoom).catch(() => {});
+});
 
-async function normalizeWindow(windowId) {
-  const win = await chrome.windows.get(windowId);
-  if (win.state === "normal") return { ok: true, changed: false };
-  await chrome.windows.update(windowId, { state: "normal" });
-  await new Promise((r) => setTimeout(r, 700));
-  return { ok: true, changed: true };
+async function restoreZoom(tabId) {
+  const zoom = tabZooms.get(tabId);
+  if (zoom == null) return;
+  tabZooms.delete(tabId);
+  try {
+    await chrome.tabs.setZoom(tabId, zoom);
+  } catch {}
 }
 
-async function resizeWindow(windowId, width, height) {
-  if (!windowStates.has(windowId)) {
-    const win = await chrome.windows.get(windowId);
-    windowStates.set(windowId, { width: win.width, height: win.height, state: win.state });
+async function emulateWidth(tabId, width, height) {
+  if (!tabZooms.has(tabId)) {
+    const zoom = await chrome.tabs.getZoom(tabId).catch(() => 1);
+    tabZooms.set(tabId, zoom);
   }
-  const current = await chrome.windows.get(windowId);
-  if (current.state !== "normal") {
-    await chrome.windows.update(windowId, { state: "normal" });
-    // Window managers restore a maximized window asynchronously, and the chrome frame
-    // changes width at the same time. Unmaximize first, let the caller measure the new
-    // viewport, then apply the requested bounds on the next call.
-    await new Promise((r) => setTimeout(r, 400));
-    return { ok: true, unmaximized: true, state: current.state };
+  // Browser page zoom changes CSS pixels: 480 px at 80% zoom reports innerWidth 600.
+  // Reset it while measuring, then restore it together with the emulation.
+  try {
+    await chrome.tabs.setZoom(tabId, 1);
+  } catch {}
+  try {
+    if (!debuggerTabs.has(tabId)) {
+      await chrome.debugger.attach({ tabId }, "1.3");
+      debuggerTabs.add(tabId);
+    }
+    await chrome.debugger.sendCommand({ tabId }, "Emulation.setDeviceMetricsOverride", {
+      width: Math.round(width),
+      height: Math.round(height),
+      deviceScaleFactor: 1,
+      mobile: false,
+      screenWidth: Math.round(width),
+      screenHeight: Math.round(height),
+    });
+    return { ok: true };
+  } catch (e) {
+    await restoreZoom(tabId);
+    throw e;
   }
-  await chrome.windows.update(windowId, { width: Math.max(400, Math.round(width)), height: Math.max(400, Math.round(height)) });
-  return { ok: true, state: "normal" };
 }
 
-async function restoreWindow(windowId) {
-  const saved = windowStates.get(windowId);
-  if (!saved) return { ok: true };
-  windowStates.delete(windowId);
-  if (saved.state === "maximized" || saved.state === "fullscreen") await chrome.windows.update(windowId, { state: saved.state });
-  else await chrome.windows.update(windowId, { state: "normal", width: saved.width, height: saved.height });
+async function clearEmulation(tabId) {
+  await restoreZoom(tabId);
+  if (!debuggerTabs.has(tabId)) return { ok: true };
+  debuggerTabs.delete(tabId);
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Emulation.clearDeviceMetricsOverride");
+  } catch {}
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {}
   return { ok: true };
 }
 
@@ -160,20 +184,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((e) => sendResponse({ error: String(e.message || e) }));
     return true;
   }
-  if (msg.type === "normalize-window") {
-    normalizeWindow(sender.tab.windowId)
+  if (msg.type === "emulate-width") {
+    emulateWidth(sender.tab.id, msg.width, msg.height)
       .then(sendResponse)
       .catch((e) => sendResponse({ error: String(e.message || e) }));
     return true;
   }
-  if (msg.type === "resize") {
-    resizeWindow(sender.tab.windowId, msg.width, msg.height)
-      .then(sendResponse)
-      .catch((e) => sendResponse({ error: String(e.message || e) }));
-    return true;
-  }
-  if (msg.type === "restore-window") {
-    restoreWindow(sender.tab.windowId)
+  if (msg.type === "emulate-clear") {
+    clearEmulation(sender.tab.id)
       .then(sendResponse)
       .catch((e) => sendResponse({ error: String(e.message || e) }));
     return true;

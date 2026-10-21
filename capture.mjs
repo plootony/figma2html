@@ -99,7 +99,7 @@ const FREEZE_CSS = `*,*::before,*::after{animation-duration:0s!important;animati
  * Capture a page. Returns { name, height, fig (Buffer), clipboardHtml, nodes, images, log, debug, trace? }.
  * `inspect(page, trace)` (optional, verify.mjs) runs on the live page after the capture.
  */
-export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", targetSelectors = [], visibleOnly = false, inspect }) {
+export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", targetSelectors = [], extraInfo = false, inspect }) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   const log = [];
@@ -126,7 +126,7 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
     await page.waitForNetworkIdle({ idleTime: 800, concurrency: 2, timeout: 10000 }).catch(() => {});
     await page.addStyleTag({ content: FREEZE_CSS });
     stage("network idle");
-    if (!visibleOnly) await autoScroll(page);
+    await autoScroll(page);
     stage("scrolled");
     await page.waitForNetworkIdle({ idleTime: 800, concurrency: 2, timeout: 8000 }).catch(() => {});
 
@@ -147,8 +147,8 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
     const thumbnail = await page.screenshot({
       type: "png",
       clip: targetRect
-        ? { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: Math.min(targetRect.height, Math.round(targetRect.width * 0.625)), scale: 400 / targetRect.width }
-        : { x: 0, y: 0, width, height: Math.min(height, Math.round(width * 0.625)), scale: 400 / width },
+        ? { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: targetRect.height, scale: Math.min(400 / targetRect.width, 400 / targetRect.height) }
+        : { x: 0, y: 0, width, height, scale: Math.min(400 / width, 400 / height) },
     });
 
     stage("thumbnail");
@@ -162,7 +162,7 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
           layout,
           hideSelectors,
           targetSelectors: selectors,
-          visibleOnly,
+          extraInfo,
           thumbnailB64: Buffer.from(thumbnail).toString("base64"),
           withTrace: Boolean(inspect),
         });

@@ -6,6 +6,7 @@ import { pickElements, describe } from "./picker.js";
 import { scanFonts } from "./fontscan.js";
 import { scanBreakpoints } from "./breakpoints.js";
 import { mergeMessages, toClipboardHtml, toFigFile } from "../core/post.js";
+import { bytesToBase64 } from "../core/bytes.js";
 
 
 function send(msg) {
@@ -46,15 +47,31 @@ function cssPath(el) {
 }
 
 const net = {
+  // Same-origin (and CORS-enabled) resources are fetched from the page itself: this keeps
+  // the site's own referer/cookies and honours a certificate exception accepted for the tab.
+  // Everything else goes through background.js, which has no CORS limits.
   async text(url) {
-    const r = await send({ type: "net", url, kind: "text" });
-    if (r.error) throw new Error(r.error);
-    return r.text;
+    try {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    } catch {
+      const r = await send({ type: "net", url, kind: "text" });
+      if (r.error) throw new Error(r.error);
+      return r.text;
+    }
   },
   async get(url) {
-    const r = await send({ type: "net", url, kind: "bytes" });
-    if (r.error) throw new Error(r.error);
-    return r;
+    try {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      return { b64: bytesToBase64(bytes), mime: (res.headers.get("content-type") || "application/octet-stream").split(";")[0].trim() };
+    } catch {
+      const r = await send({ type: "net", url, kind: "bytes" });
+      if (r.error) throw new Error(r.error);
+      return r;
+    }
   },
 };
 
@@ -80,6 +97,7 @@ button.secondary { background: transparent; color: #4d8dff; }
 button:disabled { opacity: .5; cursor: default; }
 .status { margin-top: 10px; min-height: 18px; }
 .err { color: #ff6b6b; }
+.warn { color: #ffb454; }
 .ok { color: #3fbf75; }
 .hidden { display: none; }
 .svgblock { margin-top: 12px; border-top: 1px solid #3a3a36; padding-top: 10px; }
@@ -100,6 +118,7 @@ button:disabled { opacity: .5; cursor: default; }
 .mediameta { color: #9a9a94; font-size: 11px; }
 button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36; background: transparent; color: #4d8dff; font: inherit; cursor: pointer; }
 .targetrow { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+.pickhint { margin-top: 6px; }
 .targetinfo { flex: 1; min-width: 0; }
 .targetname { display: block; color: #4d8dff; font-size: 12px; }
 .targettags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
@@ -190,6 +209,7 @@ function createPanel() {
       <div class="tab tab-figma">
       <div class="muted width"></div>
       <button class="secondary pick">Выбрать блок на странице</button>
+      <div class="muted pickhint">Ctrl+клик — выбрать несколько блоков</div>
       <div class="targetrow hidden">
         <div class="targetinfo"><span class="targetname"></span><div class="targettags"></div></div>
         <button class="small clear">Сбросить</button>
@@ -200,8 +220,8 @@ function createPanel() {
           <button class="small advreset" type="button">Сбросить настройки</button>
           <label><input type="checkbox" class="abs"> Без auto layout</label>
           <label><input type="checkbox" class="exclude"> Исключить блоки</label>
-          <label><input type="checkbox" class="visible"> Только видимая часть страницы</label>
           <label><input type="checkbox" class="logging"> Логирование</label>
+          <label><input type="checkbox" class="extrainfo"> Доп. информация</label>
           <div class="muted">Ширины из CSS (медиа-запросы): <span class="widthcount"></span><button class="small widthscan">Найти</button></div>
           <div class="kinds widths widthlist"></div>
           <label>Своя: <input type="number" class="widthcustom" min="200" max="4000" step="1" placeholder="1280"> px</label>
@@ -297,8 +317,8 @@ function createPanel() {
         [SETTINGS_KEY]: {
           abs: $(".abs").checked,
           exclude: $(".exclude").checked,
-          visible: $(".visible").checked,
           logging: $(".logging").checked,
+          extraInfo: $(".extrainfo").checked,
           widths: [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => Number(i.dataset.width)),
           detectedWidths,
           customWidth: $(".widthcustom").value,
@@ -418,8 +438,8 @@ function createPanel() {
     const active = [];
     if ($(".abs").checked) active.push("Без auto layout");
     if ($(".exclude").checked) active.push("Исключить блоки");
-    if ($(".visible").checked) active.push("Только видимая часть страницы");
     if ($(".logging").checked) active.push("Логирование");
+    if ($(".extrainfo").checked) active.push("Доп. информация");
     const widths = [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => i.dataset.width);
     if (widths.length) active.push(`Ширины: ${widths.join(", ")}`);
     const custom = $(".widthcustom").value.trim();
@@ -441,15 +461,15 @@ function createPanel() {
     saveSettings();
     updateAdvancedBadge();
   });
-  $(".visible").addEventListener("change", () => {
-    saveSettings();
-    updateAdvancedBadge();
-  });
   $(".logging").addEventListener("change", () => {
     updateLogVisibility();
     saveSettings();
     updateAdvancedBadge();
     if ($(".logging").checked) addLog("Логирование включено");
+  });
+  $(".extrainfo").addEventListener("change", () => {
+    saveSettings();
+    updateAdvancedBadge();
   });
   $(".widthlist").addEventListener("change", () => {
     saveSettings();
@@ -461,7 +481,7 @@ function createPanel() {
   });
   $(".hide").addEventListener("input", saveSettings);
   $(".advreset").addEventListener("click", () => {
-    for (const sel of [".abs", ".exclude", ".visible", ".logging"]) $(sel).checked = false;
+    for (const sel of [".abs", ".exclude", ".logging", ".extrainfo"]) $(sel).checked = false;
     for (const input of root.querySelectorAll(".widths input[data-width]")) input.checked = false;
     $(".widthcustom").value = "";
     $(".hide").value = "";
@@ -539,8 +559,8 @@ function createPanel() {
     if (!saved) return;
     $(".abs").checked = Boolean(saved.abs);
     $(".exclude").checked = Boolean(saved.exclude);
-    $(".visible").checked = Boolean(saved.visible);
     $(".logging").checked = Boolean(saved.logging);
+    $(".extrainfo").checked = Boolean(saved.extraInfo);
     updateLogVisibility();
     if ($(".logging").checked) addLog("Логирование включено");
     detectedWidths = Array.isArray(saved.detectedWidths) ? saved.detectedWidths : Array.isArray(saved.widths) ? saved.widths : [];
@@ -596,17 +616,24 @@ function createPanel() {
   });
 
   // Screenshot of the top of the page for the .fig thumbnail; the panel is hidden meanwhile.
-  async function thumbnail() {
+  async function thumbnail(info) {
     host.style.display = "none";
     await nextFrame();
     try {
       const r = await send({ type: "shot" });
       if (!r.dataUrl) return null;
       const bmp = await createImageBitmap(await (await fetch(r.dataUrl)).blob());
-      const w = 400;
-      const h = Math.round((bmp.height * w) / bmp.width);
+      const BOX = 400;
+      const source = info?.width ? { width: info.width, height: info.height } : { width: bmp.width, height: bmp.height };
+      const fit = Math.min(BOX / source.width, BOX / source.height);
+      const w = Math.max(1, Math.round(source.width * fit));
+      const h = Math.max(1, Math.round(source.height * fit));
       const canvas = new OffscreenCanvas(w, h);
-      canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
+      const scale = Math.max(w / bmp.width, h / bmp.height);
+      const dw = bmp.width * scale;
+      const dh = bmp.height * scale;
+      canvas.getContext("2d").drawImage(bmp, (w - dw) / 2, 0, dw, dh);
+      bmp.close?.();
       return new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
     } finally {
       host.style.display = "";
@@ -624,43 +651,21 @@ function createPanel() {
     return createImageBitmap(await (await fetch(r.dataUrl)).blob());
   }
 
-  const waitResize = () =>
-    new Promise((resolve) => {
-      let timer = setTimeout(done, 1400);
-      function done() {
-        clearTimeout(timer);
-        window.removeEventListener("resize", done);
-        setTimeout(resolve, 700);
-      }
-      window.addEventListener("resize", done);
-    });
-
-  async function resizeToInner(width) {
-    if (Math.abs(window.innerWidth - width) < 2) return window.innerWidth;
-    const height = window.outerHeight;
-    const normalized = await send({ type: "normalize-window" }).catch(() => null);
-    if (normalized?.changed) await waitResize();
-    for (let i = 0; i < 4; i++) {
-      const before = { inner: window.innerWidth, outer: window.outerWidth };
-      // The chrome frame between outer and inner width changes after unmaximizing, so
-      // recompute it every attempt instead of accumulating deltas.
-      const targetOuter = window.outerWidth + (width - window.innerWidth);
-      const res = await send({ type: "resize", width: targetOuter, height }).catch(() => null);
-      await waitResize();
-      if (res?.unmaximized) {
-        await waitResize();
-        continue;
-      }
-      if (Math.abs(window.innerWidth - width) < 2) break;
-      // The window changed but the page's viewport did not: DevTools device emulation
-      // (or a window manager) is fixing the layout width; more attempts won't help.
-      if (window.outerWidth !== before.outer && window.innerWidth === before.inner) break;
+  async function applyViewport(width) {
+    const height = Math.max(600, Math.round(window.innerHeight));
+    const res = await send({ type: "emulate-width", width, height }).catch((e) => ({ error: String(e.message || e) }));
+    if (res?.error) {
+      const reason = /another debugger/i.test(res.error) ? "закройте DevTools на этой вкладке и повторите" : res.error;
+      throw new Error(`Не удалось задать ширину ${width}px: ${reason}`);
     }
-    return window.innerWidth;
+    await new Promise((r) => setTimeout(r, 400));
+    const actual = Math.round(window.innerWidth);
+    if (Math.abs(actual - width) > 2) throw new Error(`Ширина ${width}px не применилась (получилось ${actual}px)`);
   }
 
   async function blankThumbnail(width, height) {
-    const canvas = new OffscreenCanvas(400, Math.max(1, Math.round((400 * height) / Math.max(1, width))));
+    const fit = Math.min(400 / Math.max(1, width), 400 / Math.max(1, height));
+    const canvas = new OffscreenCanvas(Math.max(1, Math.round(width * fit)), Math.max(1, Math.round(height * fit)));
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#f5f5f5";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -689,21 +694,15 @@ function createPanel() {
         progressValue = Math.min(progressValue, 8);
         progressCap = 10;
         paintProgress();
-        const actual = await resizeToInner(width);
-        stop();
-        if (Math.abs(actual - width) > 2) {
-          const note = `Ширина ${width}px не применилась (окно осталось ${actual}px). Если открыт режим устройства в DevTools, отключите его и повторите захват.`;
-          logs.push(note);
-          addLog(note, "warn");
-          continue;
-        }
         try {
+          await applyViewport(width);
+          stop();
           const r = await capture(
             {
               layout: $(".abs").checked ? "absolute" : "auto",
               hideSelectors: $(".exclude").checked ? $(".hide").value : "",
               targets: targets.length ? targets : undefined,
-              visibleOnly: $(".visible").checked,
+              extraInfo: $(".extrainfo").checked,
               shouldCancel: () => cancelRequested,
             },
             { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
@@ -726,7 +725,7 @@ function createPanel() {
       const first = results[0];
       const message = mergeMessages(parts);
       const name = `${document.title || location.hostname} — ${results.map((r) => r.width).join(" / ")}px`;
-      const shot = (await thumbnail().catch(() => null)) || (await blankThumbnail(totalWidth, totalHeight));
+      const shot = (await thumbnail({ width: totalWidth, height: totalHeight }).catch(() => null)) || (await blankThumbnail(totalWidth, totalHeight));
       return {
         ...first,
         name,
@@ -750,8 +749,7 @@ function createPanel() {
         },
       };
     } finally {
-      await send({ type: "restore-window" }).catch(() => null);
-      await waitResize();
+      await send({ type: "emulate-clear" }).catch(() => null);
     }
   }
 
@@ -779,7 +777,7 @@ function createPanel() {
             layout: $(".abs").checked ? "absolute" : "auto",
             hideSelectors: $(".exclude").checked ? $(".hide").value : "",
             targets: targets.length ? targets : undefined,
-            visibleOnly: $(".visible").checked,
+            extraInfo: $(".extrainfo").checked,
             shouldCancel: () => cancelRequested,
           },
           { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
@@ -788,20 +786,20 @@ function createPanel() {
       finishProgress();
       for (const line of result.log || []) addLog(line, /Не удалось|Не загрузились/.test(line) ? "warn" : "");
       console.info("site2figma: capture", JSON.stringify(result.debug.fixes), "fonts", JSON.stringify(result.debug.fonts));
-      const notes = result.log.length ? " " + result.log.join(" ") : "";
+      const notes = result.log.filter((line) => !/Не удалось|Не загрузились/.test(line)).join(" ");
       const summary = `Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.width}px, ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.`;
       $(".result").classList.remove("hidden");
       renderSvgList();
       renderDiagnostics();
-      status(`${summary} Копирую в буфер…`, "ok");
+      status(`${summary} Копирую в буфер…`);
       const copied = await copyHtml(result.clipboardHtml).catch(() => false);
       if (copied) {
-        status(`${summary} Скопировано в буфер — Ctrl+V в Figma.${notes}`, "ok");
+        status(`${summary} Скопировано в буфер — Ctrl+V в Figma.${notes ? " " + notes : ""}`, "ok");
         toast("Скопировано в буфер обмена — Ctrl+V в Figma");
         $(".copy").textContent = "Скопировано — Ctrl+V в Figma";
         setTimeout(() => ($(".copy").textContent = "Копировать для вставки в Figma"), 3200);
       } else {
-        status(`${summary}${notes}`, "ok");
+        status(`${summary} Не удалось скопировать автоматически — нажмите «Копировать для вставки в Figma».`, "err");
         toast("Не удалось скопировать автоматически — нажмите «Копировать для вставки в Figma»");
       }
       hideProgress(1200);
@@ -893,6 +891,8 @@ function createPanel() {
     ];
     const box = $(".diag");
     box.classList.toggle("hidden", !rows.length);
+    box.open = rows.length > 0;
+    box.querySelector("summary").textContent = rows.length ? `Ошибки при конвертации (${rows.length})` : "Диагностика";
     const list = $(".diaglist");
     list.textContent = "";
     for (const [kind, text] of rows) {

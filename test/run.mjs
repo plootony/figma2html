@@ -1,10 +1,11 @@
-// Smoke tests on local fixtures: whole page, block, multi-block, visible-only and merging
-// captures of different widths into one canvas.
+// Smoke tests on local fixtures: whole page, block, multi-block and merging captures of
+// different widths into one canvas.
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFigmaData } from "@figit/fig-kiwi";
+import { unzipSync, strFromU8 } from "fflate";
 import { capturePage, closeBrowser } from "../capture.mjs";
 import { mergeMessages, toClipboardHtml } from "../src/core/post.js";
 
@@ -31,6 +32,20 @@ const url = `http://127.0.0.1:${server.address().port}/`;
 const decode = (html) => decodeFigmaData(Buffer.from(html.match(/\(figma\)([^(]*)\(\/figma\)/)[1], "base64")).message;
 const textOf = (message) => message.nodeChanges.filter((n) => n.type === "TEXT").map((n) => n.textData?.characters || "").join("\n");
 const rootFrames = (message) => message.nodeChanges.filter((n) => n.type === "FRAME" && n.parentIndex?.guid.sessionID === 0 && n.parentIndex?.guid.localID === 1);
+const figInfo = (fig) => {
+  const zip = unzipSync(new Uint8Array(fig));
+  const meta = JSON.parse(strFromU8(zip["meta.json"]));
+  const png = zip["thumbnail.png"];
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  const message = decodeFigmaData(zip["canvas.fig"]).message;
+  const roots = message.nodeChanges.filter((n) => n.type === "FRAME" && n.parentIndex?.guid.sessionID === 0 && n.parentIndex?.guid.localID === 1);
+  return {
+    meta: meta.client_meta,
+    png: { width: view.getUint32(16), height: view.getUint32(20) },
+    root: roots[0] && { x: roots[0].transform.m02, y: roots[0].transform.m12, width: roots[0].size.x, height: roots[0].size.y },
+    hasImagesDir: Boolean(zip["images/"]),
+  };
+};
 
 try {
   const whole = await capturePage({ url, width: 1200 });
@@ -38,6 +53,11 @@ try {
   check("whole page has layers", whole.nodes > 0 && wholeMsg.nodeChanges.length > 3);
   check("whole page includes outside content", textOf(wholeMsg).includes("Outside header"));
   check("whole page .fig is non-empty", whole.fig.length > 1000);
+  const info = figInfo(whole.fig);
+  check("thumbnail metadata matches the PNG", info.meta.thumbnail_size.width === info.png.width && info.meta.thumbnail_size.height === info.png.height, JSON.stringify(info));
+  check("thumbnail fits in 400x400", info.png.width <= 400 && info.png.height <= 400, JSON.stringify(info.png));
+  check("render coordinates match the root frame", info.root && Math.abs(info.meta.render_coordinates.width - info.root.width) < 0.5 && Math.abs(info.meta.render_coordinates.height - info.root.height) < 0.5, JSON.stringify(info));
+  check("images/ directory is present", info.hasImagesDir);
   check("css background layer added", whole.debug.fixes.backgrounds >= 1);
   check("pseudo-element text materialized", textOf(wholeMsg).includes("Before"));
 
@@ -48,6 +68,13 @@ try {
   check("block keeps its own content", blockText.includes("Hero title") && blockText.includes("Hero text"));
   check("block has one root frame", rootFrames(blockMsg).length === 1);
 
+  const extra = await capturePage({ url, width: 1200, extraInfo: true });
+  const infoMsg = decode(extra.clipboardHtml);
+  const infoFrame = rootFrames(infoMsg).find((n) => n.name === "Доп. информация");
+  check("additional info frame is added", Boolean(infoFrame));
+  const infoImage = infoFrame && infoMsg.nodeChanges.some((n) => n.parentIndex?.guid.sessionID === infoFrame.guid.sessionID && n.parentIndex?.guid.localID === infoFrame.guid.localID && n.fillPaints?.some((p) => p.type === "IMAGE"));
+  check("additional info is rendered as an image", Boolean(infoImage));
+
   const multi = await capturePage({ url, width: 1200, targetSelectors: ["#hero", "#cards"] });
   const multiMsg = decode(multi.clipboardHtml);
   const roots = rootFrames(multiMsg);
@@ -57,12 +84,8 @@ try {
     check("multi-block frames keep both contents", textOf(multiMsg).includes("Hero title") && textOf(multiMsg).includes("Card one"));
   }
 
-  const visible = await capturePage({ url, width: 1200, visibleOnly: true });
-  check("visible-only page is clipped to the viewport", visible.height <= 900, `height ${visible.height}`);
-  check("visible-only still produces a .fig", visible.fig.length > 1000);
-
-  const w1 = await capturePage({ url, width: 1200, visibleOnly: true });
-  const w2 = await capturePage({ url, width: 900, visibleOnly: true });
+  const w1 = await capturePage({ url, width: 1200 });
+  const w2 = await capturePage({ url, width: 900 });
   const merged = mergeMessages([
     { message: decode(w1.clipboardHtml), x: 0, y: 0 },
     { message: decode(w2.clipboardHtml), x: w1.width + 80, y: 0 },

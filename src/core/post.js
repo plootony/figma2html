@@ -389,21 +389,50 @@ export function toFigFile(message, { name, thumbnail, width, height }) {
   view.setUint32(16 + schemaChunk.length, messageZstd.length, true);
   canvasFig.set(messageZstd, 20 + schemaChunk.length);
 
-  const shotHeight = Math.min(height, Math.round(width * 0.625));
+  // The extension takes a screenshot of the viewport (any aspect ratio), so the PNG size
+  // must be read back instead of guessing it from the page size — Figma rejects a .fig
+  // whose thumbnail_size does not match thumbnail.png.
+  const pngSize = (() => {
+    if (!thumbnail || thumbnail.length < 24) return null;
+    const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (sig.some((b, i) => thumbnail[i] !== b)) return null;
+    const view = new DataView(thumbnail.buffer, thumbnail.byteOffset, thumbnail.byteLength);
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  })();
+  // Figma's own exports set render_coordinates to the root frame's box. A thumbnail
+  // height guessed from the page width (the old behaviour) made tall pages inconsistent
+  // with the document and Figma rejected the file on import.
+  const rootFrames = nodes.filter(
+    (n) => n.type === "FRAME" && n.parentIndex?.guid.sessionID === canvas.guid.sessionID && n.parentIndex?.guid.localID === canvas.guid.localID
+  );
+  let render = { x: 0, y: 0, width, height };
+  if (rootFrames.length) {
+    const xs = rootFrames.map((n) => n.transform?.m02 || 0);
+    const ys = rootFrames.map((n) => n.transform?.m12 || 0);
+    const left = Math.min(...xs);
+    const top = Math.min(...ys);
+    render = {
+      x: left,
+      y: top,
+      width: Math.max(...rootFrames.map((n, i) => xs[i] + (n.size?.x || 0))) - left,
+      height: Math.max(...rootFrames.map((n, i) => ys[i] + (n.size?.y || 0))) - top,
+    };
+  }
   const meta = {
     client_meta: {
       background_color: CANVAS_BG,
-      thumbnail_size: { width: 400, height: Math.round((400 * shotHeight) / width) },
-      render_coordinates: { x: 0, y: 0, width, height: shotHeight },
+      thumbnail_size: pngSize || { width: 400, height: Math.max(1, Math.round((400 * render.height) / Math.max(1, render.width))) },
+      render_coordinates: render,
     },
     file_name: name,
     developer_related_links: [],
-    version: "1",
+    exported_at: new Date().toISOString(),
   };
   const files = {
     "canvas.fig": [canvasFig, { level: 0 }],
     "meta.json": [strToU8(JSON.stringify(meta)), { level: 0 }],
     "thumbnail.png": [thumbnail, { level: 0 }],
+    "images/": [new Uint8Array(0), { level: 0 }],
   };
   for (const [h, bytes] of Object.entries(images)) files[`images/${h}`] = [bytes, { level: 0 }];
   return zipSync(files);

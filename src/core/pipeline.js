@@ -15,12 +15,12 @@ import { createFontLoader, charsetOf, resolveStack, parseFontFaces, firstFamily 
 import { addBackgroundImages, hasUrlBackground } from "./backgrounds.js";
 import { prepareSvgImages, resolveSvgUses, rasterizeSvg, isSvgUrl, fileName } from "./svg.js";
 import { snapshotMediaElements, applySnapshots } from "./snapshots.js";
+import { ICON_FONT, rasterizeIconFonts, applyIconFonts } from "./icons.js";
 import { zipSync, strToU8 } from "fflate";
 import { decodePayload, sanitize, fixBlankGlyphs, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile, mergeMessages } from "./post.js";
 
 // Elements that never paint themselves (the converter tried to turn <source> into a frame and failed).
 const NON_RENDERED = new Set(["source", "track", "param", "area", "map", "datalist", "option", "optgroup", "base", "wbr"]);
-const ICON_FONT = /icon|awesome|lucide|material|symbol|glyph|feather|remix|ionic|dashicons|^fa[-\s]/i;
 const TEXT_CHAR = /[\p{L}\p{N}]/u;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -190,14 +190,16 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
   const stacks = new Set();
   for (const el of elements) if (isTextElement(el)) stacks.add(getComputedStyle(el).fontFamily);
   const plan = {};
+  const mapping = new Map();
   for (const stack of stacks) {
     const first = firstFamily(stack);
     if (ICON_FONT.test(first)) continue;
     const target = await resolveStack(stack, chars, fonts);
+    mapping.set(`${first}->${target}`, { from: first, to: target });
     if (target !== first) plan[stack] = target;
   }
   const targets = [...new Set(Object.values(plan))];
-  if (!targets.length) return [];
+  if (!targets.length) return { changes: [], mapping: [...mapping.values()] };
 
   const spec = "100,200,300,400,500,600,700,800,900,100i,200i,300i,400i,500i,600i,700i,800i,900i";
   await Promise.all(
@@ -237,7 +239,10 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
     }
     document.body.offsetHeight;
   }
-  return [...new Set(Object.entries(plan).map(([stack, t]) => `${firstFamily(stack)} → ${t}`))];
+  return {
+    changes: [...new Set(Object.entries(plan).map(([stack, t]) => `${firstFamily(stack)} → ${t}`))],
+    mapping: [...mapping.values()],
+  };
 }
 
 // Make typography explicit before conversion, so the converter reads exact values:
@@ -456,17 +461,102 @@ async function resizeImage(bytes, tw, th) {
 
 // Plain thumbnail when no screenshot is available (Figma requires thumbnail.png).
 async function placeholderThumbnail(width, height) {
-  const canvas = new OffscreenCanvas(400, Math.max(1, Math.round((400 * height) / width)));
+  const fit = Math.min(400 / Math.max(1, width), 400 / Math.max(1, height));
+  const canvas = new OffscreenCanvas(Math.max(1, Math.round(width * fit)), Math.max(1, Math.round(height * fit)));
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = getComputedStyle(document.body).backgroundColor || "#fff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   return new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
 }
 
+
+// A small image placed next to the captured layout with the facts that are easy to lose
+// when converting: sizes, body padding/margins, font mapping and text sizes. It is drawn
+// to a canvas rather than converted as text: Figma's cached glyph data from a web font
+// subset renders as garbage until the layer is edited, while a PNG is always correct.
+async function createInfoImage({ title, sections }) {
+  const WIDTH = 420;
+  const PAD = 24;
+  const SCALE = 2;
+  const family = getComputedStyle(document.body).fontFamily;
+  const probe = new OffscreenCanvas(1, 1).getContext("2d");
+  const font = (size, weight) => `${weight} ${size}px ${family}`;
+  const maxWidth = WIDTH - PAD * 2;
+
+  const wrap = (text, size, weight) => {
+    probe.font = font(size, weight);
+    const lines = [];
+    let line = "";
+    for (const word of String(text).split(/\s+/)) {
+      const next = line ? `${line} ${word}` : word;
+      if (probe.measureText(next).width <= maxWidth) {
+        line = next;
+        continue;
+      }
+      if (line) lines.push(line);
+      line = "";
+      if (probe.measureText(word).width <= maxWidth) {
+        line = word;
+        continue;
+      }
+      for (const char of word) {
+        if (line && probe.measureText(line + char).width > maxWidth) {
+          lines.push(line);
+          line = char;
+        } else line += char;
+      }
+    }
+    if (line) lines.push(line);
+    return lines.length ? lines : [""];
+  };
+
+  const items = [];
+  const add = (text, size, weight, color, before = 0, lineHeight = 1.45) => items.push({ text, size, weight, color, before, lineHeight });
+  add(title, 16, 700, "#111111", 0, 1.3);
+  for (const section of sections) {
+    if (!section.lines.length) continue;
+    add(section.heading, 11, 700, "#777777", 14, 1.3);
+    for (const line of section.lines) add(line, 13, 400, "#111111");
+  }
+
+  let y = PAD;
+  const rows = [];
+  for (const item of items) {
+    y += item.before;
+    for (const line of wrap(item.text, item.size, item.weight)) {
+      rows.push({ line, y, size: item.size, weight: item.weight, color: item.color });
+      y += item.size * item.lineHeight;
+    }
+  }
+  const height = Math.ceil(y + PAD);
+  const canvas = new OffscreenCanvas(WIDTH * SCALE, height * SCALE);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, WIDTH, height);
+  ctx.strokeStyle = "#dddddd";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, WIDTH - 1, height - 1);
+  ctx.textBaseline = "top";
+  for (const row of rows) {
+    ctx.font = font(row.size, row.weight);
+    ctx.fillStyle = row.color;
+    ctx.fillText(row.line, PAD, row.y);
+  }
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+  return { dataUrl, width: WIDTH, height };
+}
+
 export async function capture(options, env) {
   // keepModified: leave the prepared DOM in place (verify.mjs inspects it); call the
   // returned `restore()` afterwards.
-  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false, visibleOnly = false } = options;
+  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false, extraInfo = false } = options;
   const progress = env.progress || (() => {});
   const cancel = () => {
     if (!options.shouldCancel?.()) return;
@@ -507,7 +597,7 @@ export async function capture(options, env) {
       document.head.appendChild(style);
       journal.add(style);
     }
-    if (scroll && !visibleOnly) {
+    if (scroll) {
       progress("Прокрутка страницы…");
       await autoScroll(cancel);
     }
@@ -552,19 +642,21 @@ export async function capture(options, env) {
         if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") text += (el.placeholder || "") + (el.value || "");
       }
     }
-    const chars = charsetOf(text);
+    let chars = charsetOf(text);
     const pageFaces = await collectFontFaces(net);
     cancel();
-    const substitutions = await substituteFonts(chars, fonts, journal, env.bundledFont, roots);
-    if (substitutions.length) log.push("Замена шрифтов: " + substitutions.join(", "));
+    const fontSubstitution = await substituteFonts(chars, fonts, journal, env.bundledFont, roots);
+    if (fontSubstitution.changes.length) log.push("Замена шрифтов: " + fontSubstitution.changes.join(", "));
     normalizeTypography(journal, roots);
+    cancel();
+    const iconImages = await rasterizeIconFonts(roots);
 
     const title = document.title || location.hostname;
     const viewportHeight = Math.max(1, Math.round(window.innerHeight));
     let frames;
     if (wholePage) {
       const width = document.documentElement.clientWidth;
-      const height = visibleOnly ? viewportHeight : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
       frames = [{ element: document.body, width, height: Math.max(1, Math.round(height)), name: `${title} — ${width}px` }];
     } else {
       frames = roots.map((element) => {
@@ -573,6 +665,52 @@ export async function capture(options, env) {
         const width = Math.max(1, Math.round(rect.width));
         return { element, width, height: Math.max(1, Math.round(rect.height)), name: `${title} — ${describe(element)} — ${width}px` };
       });
+    }
+    const mainFrames = frames;
+    if (extraInfo) {
+      const number = (value) => {
+        const n = Math.round((parseFloat(value) || 0) * 10) / 10;
+        return Number.isInteger(n) ? String(n) : n.toFixed(1);
+      };
+      const box = (value) => [value.paddingTop, value.paddingRight, value.paddingBottom, value.paddingLeft, value.marginTop, value.marginRight, value.marginBottom, value.marginLeft].map(number).join(" / ");
+      const sizes = new Set();
+      for (const root of roots) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const el = walker.currentNode.parentElement;
+          if (!el) continue;
+          const size = parseFloat(getComputedStyle(el).fontSize);
+          if (size > 0) sizes.add(Math.round(size * 10) / 10);
+        }
+      }
+      const sections = [
+        { heading: "PAGE", lines: [`URL: ${location.href}`, `Captured: ${new Date().toISOString()}`, `Blocks: ${mainFrames.length}`] },
+        {
+          heading: "SIZES",
+          lines: mainFrames.map((frame, i) => `${wholePage ? "Page" : describe(roots[i] || frame.element)}: ${frame.width} x ${frame.height} px`),
+        },
+        {
+          heading: "PADDING / MARGIN (px)",
+          lines: mainFrames.map((frame, i) => `${wholePage ? "Page" : describe(roots[i] || frame.element)}: ${box(getComputedStyle(frame.element))}`),
+        },
+        {
+          heading: "FONTS (ORIGINAL -> IN FIGMA)",
+          lines: fontSubstitution.mapping.map(({ from, to }) => `${from} -> ${to}`),
+        },
+        {
+          heading: "TEXT SIZES (px)",
+          lines: [[...sizes].sort((a, b) => a - b).map((n) => number(n)).join(", ")],
+        },
+      ];
+      const info = await createInfoImage({ title: "SITE TO FIGMA / ADDITIONAL INFO", sections });
+      const image = document.createElement("img");
+      image.src = info.dataUrl;
+      image.width = info.width;
+      image.height = info.height;
+      Object.assign(image.style, { position: "fixed", left: "-20000px", top: "0", width: `${info.width}px`, height: `${info.height}px` });
+      document.documentElement.appendChild(image);
+      journal.add(image);
+      frames = [...mainFrames, { element: image, width: info.width, height: info.height, name: "Доп. информация" }];
     }
     const GAP = 80;
     let offsetX = 0;
@@ -583,7 +721,7 @@ export async function capture(options, env) {
     }
     const totalWidth = Math.max(1, offsetX - GAP);
     const totalHeight = Math.max(1, ...frames.map((f) => f.height));
-    const name = frames.length === 1 ? frames[0].name : `${title} — блоки: ${frames.length} — ${totalWidth}px`;
+    const name = mainFrames.length === 1 ? mainFrames[0].name : `${title} — блоки: ${mainFrames.length} — ${totalWidth}px`;
 
     cancel();
     let thumbnail = null;
@@ -592,10 +730,10 @@ export async function capture(options, env) {
         frames[0].element.scrollIntoView({ block: "start", inline: "nearest" });
         await wait(100);
       } else window.scrollTo(0, 0);
-      thumbnail = env.thumbnail ? await env.thumbnail().catch(() => null) : null;
+      thumbnail = env.thumbnail ? await env.thumbnail({ width: totalWidth, height: totalHeight }).catch(() => null) : null;
       window.scrollTo(0, 0);
     }
-    if (!thumbnail) thumbnail = await placeholderThumbnail(totalWidth, Math.min(totalHeight, totalWidth * 0.625));
+    if (!thumbnail) thumbnail = await placeholderThumbnail(totalWidth, totalHeight);
 
     progress("Конвертация…");
     const fontSources = new Map();
@@ -646,7 +784,7 @@ export async function capture(options, env) {
 
     const parts = [];
     const failures = [];
-    const fixes = { nan: 0, glyphs: 0, lineBoxes: 0, backgrounds: 0, snapshots: 0, svgNamed: 0, hugWithFill: 0, siblingGroups: 0, scrollBehavior: 0, prototypeDevice: 0 };
+    const fixes = { nan: 0, glyphs: 0, lineBoxes: 0, backgrounds: 0, snapshots: 0, svgNamed: 0, iconFonts: 0, hugWithFill: 0, siblingGroups: 0, scrollBehavior: 0, prototypeDevice: 0 };
     const images = { before: 0, after: 0 };
     let trace;
     for (let i = 0; i < frames.length; i++) {
@@ -691,6 +829,7 @@ export async function capture(options, env) {
       };
       for (const [k, v] of Object.entries(one)) fixes[k] = (fixes[k] || 0) + v;
       fixTextLayout(message);
+      fixes.iconFonts += applyIconFonts(message, result.trace, iconImages, resolveTraceElement);
       const resized = await optimizeImages(message, resizeImage);
       images.before += resized.before;
       images.after += resized.after;
@@ -708,6 +847,7 @@ export async function capture(options, env) {
       log.push(`Не удалось полностью перенести элементов: ${failures.length} (их содержимое сохранено). Первая ошибка — ${failures[0]}`);
       console.warn("site2figma: conversion errors", failures);
     }
+    if (fixes.iconFonts) log.push(`Иконочные шрифты: ${fixes.iconFonts} заменены картинками`);
     if (imageFailures.length) log.push(`Не загрузились картинки: ${imageFailures.length}. Первая — ${imageFailures[0]}`);
     if (fontFailures.length) log.push(`Не загрузились шрифты: ${fontFailures.length}. Первый — ${fontFailures[0]}`);
 

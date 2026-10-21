@@ -9,8 +9,8 @@ const PORT = Number(process.env.PORT) || 4747;
 const OUT_DIR = path.join(ROOT, "output");
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
-async function capture({ url, width, layout, hideSelectors, targetSelector, targetSelectors, visibleOnly }) {
-  const r = await capturePage({ url, width, layout, hideSelectors, targetSelector, targetSelectors, visibleOnly });
+async function capture({ url, width, layout, hideSelectors, targetSelector, targetSelectors }) {
+  const r = await capturePage({ url, width, layout, hideSelectors, targetSelector, targetSelectors });
   const base = `${new URL(url).hostname}_${width}_${Date.now()}`;
   fs.writeFileSync(path.join(OUT_DIR, base + ".html"), r.clipboardHtml);
   fs.writeFileSync(path.join(OUT_DIR, base + ".fig"), r.fig);
@@ -77,7 +77,7 @@ const server = http.createServer(async (req, res) => {
       const results = [];
       for (const width of widths) {
         const t = Date.now();
-        const r = await capture({ url, width, layout, hideSelectors: body.hideSelectors, targetSelector: body.targetSelector, targetSelectors: Array.isArray(body.targetSelectors) ? body.targetSelectors : [], visibleOnly: Boolean(body.visibleOnly) });
+        const r = await capture({ url, width, layout, hideSelectors: body.hideSelectors, targetSelector: body.targetSelector, targetSelectors: Array.isArray(body.targetSelectors) ? body.targetSelectors : [] });
         console.log(`[ok] ${url} @${width}px → ${r.base} (${((Date.now() - t) / 1000).toFixed(1)}s)`);
         results.push(r);
       }
