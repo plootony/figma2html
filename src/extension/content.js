@@ -2,14 +2,42 @@
 // captured). Runs the in-page pipeline; network and the thumbnail go through background.js.
 import { capture } from "../core/pipeline.js";
 import { scanMedia } from "./media.js";
-import { pickElement, describe } from "./picker.js";
+import { pickElements, describe } from "./picker.js";
 import { scanFonts } from "./fontscan.js";
+import { scanBreakpoints } from "./breakpoints.js";
+import { mergeMessages, toClipboardHtml, toFigFile } from "../core/post.js";
 
 
 function send(msg) {
   return new Promise((resolve, reject) =>
     chrome.runtime.sendMessage(msg, (r) => (chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve(r)))
   );
+}
+
+// Stable selector for saving the chosen blocks between panel openings.
+function cssPath(el) {
+  if (!el || el.nodeType !== 1) return "";
+  const parts = [];
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    if (node === document.documentElement) {
+      parts.unshift("html");
+      break;
+    }
+    if (node.id) {
+      parts.unshift(`#${CSS.escape(node.id)}`);
+      break;
+    }
+    const tag = node.tagName.toLowerCase();
+    const parent = node.parentElement;
+    if (!parent) {
+      parts.unshift(tag);
+      break;
+    }
+    const same = [...parent.children].filter((c) => c.tagName === node.tagName);
+    parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(node) + 1})` : tag);
+    if (node === document.body) break;
+  }
+  return parts.join(" > ");
 }
 
 const net = {
@@ -73,8 +101,11 @@ button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36;
   font: 600 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; box-shadow: 0 8px 30px rgba(0,0,0,.35);
   opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
-.progress { height: 4px; margin-top: 8px; border-radius: 2px; background: #161615; overflow: hidden; }
+.progresswrap { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.progresswrap.hidden, .targetrow.hidden { display: none; }
+.progress { flex: 1; height: 4px; border-radius: 2px; background: #161615; overflow: hidden; }
 .progress i { display: block; height: 100%; width: 0; background: #4d8dff; transition: width .18s ease; }
+.progresswrap .cancel { flex: none; }
 .fontpreview { flex: none; width: 42px; height: 38px; display: flex; align-items: center; justify-content: center;
   border-radius: 4px; background: #161615; color: #ececea; font-size: 20px; overflow: hidden; }
 .advanced { margin-top: 10px; border-top: 1px solid #3a3a36; padding-top: 8px; }
@@ -83,6 +114,22 @@ button.small { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a3a36;
 .advanced summary::before { content: "▸"; color: #4d8dff; }
 .advanced[open] summary::before { content: "▾"; }
 .advanced-body { padding-top: 2px; }
+.diag { margin-top: 10px; border-top: 1px solid #3a3a36; padding-top: 8px; font-size: 12px; }
+.diag summary { cursor: pointer; color: #ffb454; }
+.diaglist { max-height: 180px; overflow: auto; margin-top: 6px; color: #9a9a94; }
+.diagrow { padding: 3px 0; word-break: break-word; }
+.logbox { margin-top: 10px; max-height: 220px; overflow: auto; border: 1px solid #3a3a36; border-radius: 8px;
+  background: #131312; padding: 8px; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8c8c2; }
+.logbox.hidden { display: none; }
+.logline { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
+.logline.err { color: #ff6b6b; }
+.logline.warn { color: #ffb454; }
+.logline.ok { color: #3fbf75; }
+.widths { margin: 4px 0 6px; font-size: 12px; }
+.widthcustom { width: 62px; padding: 3px 6px; border-radius: 5px; border: 1px solid #3a3a36; background: #161615; color: #ececea; font: inherit; }
+.widthcustom::-webkit-inner-spin-button { opacity: .5; }
+.widthscan { margin-left: 6px; padding: 2px 8px; font-size: 11px; }
+.widthcount { color: #4d8dff; }
 `;
 
 // Inter shipped with the extension (fonts/), used when Google Fonts can't be reached.
@@ -133,15 +180,20 @@ function createPanel() {
         <div class="advanced-body">
           <label><input type="checkbox" class="abs"> Без auto layout</label>
           <label><input type="checkbox" class="exclude"> Исключить блоки</label>
+          <label><input type="checkbox" class="visible"> Только видимая часть страницы</label>
+          <label><input type="checkbox" class="logging"> Логирование</label>
+          <div class="muted">Ширины из CSS (медиа-запросы): <span class="widthcount"></span><button class="small widthscan">Найти</button></div>
+          <div class="kinds widths widthlist"></div>
+          <label>Своя: <input type="number" class="widthcustom" min="200" max="4000" step="1" placeholder="1280"> px</label>
           <div class="hidebox hidden">
             <div class="muted">Убрать перед захватом (CSS-селекторы через запятую):</div>
             <input type="text" class="hide" placeholder="#cookie-banner, .chat-widget">
           </div>
         </div>
       </details>
-      <button class="primary go">Захватить страницу</button>
+      <button class="primary go">Захватить всю страницу</button>
       <div class="status"></div>
-      <div class="progress hidden"><i></i></div>
+      <div class="progresswrap hidden"><div class="progress"><i></i></div><button class="small cancel hidden">Остановить</button></div>
       <div class="result hidden">
         <button class="primary copy">Копировать для вставки в Figma</button>
         <button class="secondary download">Скачать .fig</button>
@@ -149,6 +201,7 @@ function createPanel() {
           <div class="muted svgnote">SVG с градиентами, тенями или анимацией перенесены картинками (слои «SVG: имя файла»). Чтобы получить векторы: в Figma выделите такой слой, здесь нажмите «Копировать», в Figma — Ctrl+Shift+R (вставить с заменой).</div>
           <div class="svglist"></div>
         </div>
+        <details class="diag hidden"><summary>Диагностика</summary><div class="diaglist"></div></details>
       </div>
       </div>
       <div class="tab tab-media hidden">
@@ -174,14 +227,32 @@ function createPanel() {
         </div>
         <div class="status fstatus"></div>
       </div>
+      <div class="logbox hidden"><div class="loglist"></div></div>
     </div>
     <div class="toast"></div>`;
   document.documentElement.appendChild(host);
 
   const $ = (s) => root.querySelector(s);
+  let logLines = 0;
+  const logEnabled = () => Boolean($(".logging")?.checked);
+  const updateLogVisibility = () => $(".logbox").classList.toggle("hidden", !logEnabled());
+  const clearLog = () => {
+    $(".loglist").textContent = "";
+    logLines = 0;
+  };
+  const addLog = (text, cls = "") => {
+    if (!text || !logEnabled()) return;
+    const line = document.createElement("div");
+    line.className = "logline" + (cls ? " " + cls : "");
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+    $(".loglist").append(line);
+    if (++logLines > 400) $(".loglist").firstElementChild?.remove();
+    $(".logbox").scrollTop = $(".logbox").scrollHeight;
+  };
   const status = (text, cls = "") => {
     $(".status").className = "status " + cls;
     $(".status").textContent = text;
+    addLog(text, cls);
   };
   const showWidth = () => ($(".width").textContent = `Ширина макета: ${document.documentElement.clientWidth}px (ширина окна)`);
   showWidth();
@@ -189,8 +260,35 @@ function createPanel() {
 
   let result = null;
   let busy = false;
-  let target = null;
+  let targets = [];
+  let detectedWidths = [];
+  let widthScanTried = false;
+  let widthScanning = false;
+  let cancelRequested = false;
   let toastTimer = 0;
+  const SETTINGS_KEY = "s2fSettings";
+  let saveTimer = 0;
+
+  const saveSettings = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const active = root.querySelector(".tabs button.active")?.dataset.tab || "figma";
+      chrome.storage?.local?.set({
+        [SETTINGS_KEY]: {
+          abs: $(".abs").checked,
+          exclude: $(".exclude").checked,
+          visible: $(".visible").checked,
+          logging: $(".logging").checked,
+          widths: [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => Number(i.dataset.width)),
+          detectedWidths,
+          customWidth: $(".widthcustom").value,
+          hide: $(".hide").value,
+          tab: active,
+          targets: targets.map(cssPath).filter(Boolean),
+        },
+      });
+    }, 150);
+  };
 
   const toast = (text) => {
     const el = $(".toast");
@@ -217,9 +315,16 @@ function createPanel() {
   const startProgress = () => {
     clearInterval(progressTimer);
     clearTimeout(progressHideTimer);
+    if (logEnabled()) {
+      clearLog();
+      addLog("Старт захвата");
+    }
     progressValue = 3;
     progressCap = 8;
-    $(".progress").classList.remove("hidden");
+    cancelRequested = false;
+    $(".progresswrap").classList.remove("hidden");
+    $(".cancel").classList.remove("hidden");
+    $(".cancel").disabled = false;
     paintProgress();
     status("Подготовка…");
     progressTimer = setInterval(() => {
@@ -230,6 +335,11 @@ function createPanel() {
   };
   const stageProgress = (message) => {
     const stage = STAGES.find(([prefix]) => message.startsWith(prefix));
+    if (stage && stage[0] === "Прокрутка" && progressValue > 25) {
+      progressValue = 8;
+      progressCap = 10;
+      paintProgress();
+    }
     if (stage) progressCap = Math.max(progressCap, stage[1]);
     status(message);
   };
@@ -239,44 +349,159 @@ function createPanel() {
     progressValue = value;
     paintProgress();
   };
-  const finishProgress = () => stopProgress(100);
+  const finishProgress = () => {
+    stopProgress(100);
+    $(".cancel").classList.add("hidden");
+  };
   const hideProgress = (delay = 900) => {
     clearTimeout(progressHideTimer);
-    progressHideTimer = setTimeout(() => $(".progress").classList.add("hidden"), delay);
+    progressHideTimer = setTimeout(() => $(".progresswrap").classList.add("hidden"), delay);
   };
+  $(".cancel").addEventListener("click", () => {
+    if (!busy || cancelRequested) return;
+    cancelRequested = true;
+    $(".cancel").disabled = true;
+    status("Останавливаю захват…");
+  });
 
   const updateTarget = () => {
-    $(".targetrow").classList.toggle("hidden", !target);
-    $(".targetname").textContent = target ? describe(target) : "";
-    $(".go").textContent = target ? "Захватить выбранный блок" : "Захватить страницу";
+    $(".targetrow").classList.toggle("hidden", !targets.length);
+    $(".targetname").textContent = targets.length === 1 ? describe(targets[0]) : targets.length ? `${targets.length} блока: ${targets.map(describe).join(", ")}` : "";
+    $(".go").textContent = targets.length ? "Захватить выбранные блоки" : "Захватить всю страницу";
   };
 
   const updateHideBox = () => $(".hidebox").classList.toggle("hidden", !$(".exclude").checked);
-  $(".exclude").addEventListener("change", updateHideBox);
+  $(".exclude").addEventListener("change", () => {
+    updateHideBox();
+    saveSettings();
+  });
+  $(".abs").addEventListener("change", saveSettings);
+  $(".visible").addEventListener("change", saveSettings);
+  $(".logging").addEventListener("change", () => {
+    updateLogVisibility();
+    saveSettings();
+    if ($(".logging").checked) addLog("Логирование включено");
+  });
+  $(".widthlist").addEventListener("change", saveSettings);
+  $(".widthcustom").addEventListener("input", saveSettings);
+  $(".hide").addEventListener("input", saveSettings);
   updateHideBox();
 
+  function renderWidths(selected = []) {
+    const list = $(".widthlist");
+    list.textContent = "";
+    $(".widthcount").textContent = detectedWidths.length ? `(${detectedWidths.length})` : "";
+    if (!detectedWidths.length) {
+      const empty = document.createElement("span");
+      empty.className = "muted";
+      empty.textContent = "не найдены";
+      list.append(empty);
+      return;
+    }
+    for (const width of detectedWidths) {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.width = String(width);
+      cb.checked = selected.includes(width);
+      label.append(cb, document.createTextNode(` ${width}`));
+      list.append(label);
+    }
+  }
+
+  async function scanCssWidths() {
+    if (widthScanning) return;
+    widthScanTried = true;
+    widthScanning = true;
+    $(".widthscan").disabled = true;
+    status("Ищу ширины в медиа-запросах…");
+    addLog("Сканирую CSS на медиа-запросы…");
+    try {
+      const found = await scanBreakpoints(net);
+      detectedWidths = found;
+      renderWidths(found);
+      saveSettings();
+      if (found.length) {
+        const text = `Ширины из CSS: ${found.join(", ")}px`;
+        status(text, "ok");
+        addLog(text);
+      } else {
+        status("Медиа-запросы с шириной не найдены");
+        addLog("Медиа-запросы с шириной не найдены", "warn");
+      }
+    } catch (e) {
+      status("Ошибка поиска ширин: " + (e.message || e), "err");
+      addLog("Ошибка поиска ширин: " + (e.message || e), "err");
+    } finally {
+      widthScanning = false;
+      $(".widthscan").disabled = false;
+    }
+  }
+
+  $(".widthscan").addEventListener("click", scanCssWidths);
+  $("details.advanced").addEventListener("toggle", (e) => {
+    if (e.target.open && !widthScanTried && !detectedWidths.length) scanCssWidths();
+  });
+
+  // Restore the last options. Selected blocks are saved as CSS selectors and only come
+  // back if the same elements still exist on the page.
+  chrome.storage?.local?.get(SETTINGS_KEY).then((res) => {
+    const saved = res?.[SETTINGS_KEY];
+    if (!saved) return;
+    $(".abs").checked = Boolean(saved.abs);
+    $(".exclude").checked = Boolean(saved.exclude);
+    $(".visible").checked = Boolean(saved.visible);
+    $(".logging").checked = Boolean(saved.logging);
+    updateLogVisibility();
+    if ($(".logging").checked) addLog("Логирование включено");
+    detectedWidths = Array.isArray(saved.detectedWidths) ? saved.detectedWidths : Array.isArray(saved.widths) ? saved.widths : [];
+    if (detectedWidths.length) widthScanTried = true;
+    renderWidths(saved.widths || []);
+    $(".widthcustom").value = saved.customWidth || "";
+    $(".hide").value = saved.hide || "";
+    updateHideBox();
+    if (saved.tab) selectTab(saved.tab);
+    if (Array.isArray(saved.targets) && saved.targets.length) {
+      const els = saved.targets
+        .map((sel) => {
+          try {
+            return document.querySelector(sel);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      if (els.length) {
+        targets = els;
+        updateTarget();
+      }
+    }
+  }).catch(() => {});
+
   // Pick a block on the page. The panel is hidden while the picker overlay is active.
-  $(".pick").addEventListener("click", async () => {
+  const startPick = async () => {
     if (busy) return;
     host.style.display = "none";
     await nextFrame();
-    let el = null;
+    let picked = [];
     try {
-      el = await pickElement();
+      picked = await pickElements();
     } finally {
       host.style.display = "";
     }
-    if (el) {
-      target = el;
+    if (picked.length) {
+      targets = picked;
       updateTarget();
-      const r = el.getBoundingClientRect();
-      status(`Выбран блок ${describe(el)} · ${Math.round(r.width)}×${Math.round(r.height)}`, "ok");
+      saveSettings();
+      status(picked.length === 1 ? `Выбран блок ${describe(picked[0])}` : `Выбрано блоков: ${picked.length}`, "ok");
     }
-  });
+  };
+  $(".pick").addEventListener("click", startPick);
 
   $(".clear").addEventListener("click", () => {
-    target = null;
+    targets = [];
     updateTarget();
+    saveSettings();
     status("Будет захвачена вся страница");
   });
 
@@ -309,10 +534,141 @@ function createPanel() {
     return createImageBitmap(await (await fetch(r.dataUrl)).blob());
   }
 
-  $(".go").addEventListener("click", async () => {
+  const waitResize = () =>
+    new Promise((resolve) => {
+      let timer = setTimeout(done, 1400);
+      function done() {
+        clearTimeout(timer);
+        window.removeEventListener("resize", done);
+        setTimeout(resolve, 700);
+      }
+      window.addEventListener("resize", done);
+    });
+
+  async function resizeToInner(width) {
+    if (Math.abs(window.innerWidth - width) < 2) return window.innerWidth;
+    const height = window.outerHeight;
+    const normalized = await send({ type: "normalize-window" }).catch(() => null);
+    if (normalized?.changed) await waitResize();
+    for (let i = 0; i < 4; i++) {
+      const before = { inner: window.innerWidth, outer: window.outerWidth };
+      // The chrome frame between outer and inner width changes after unmaximizing, so
+      // recompute it every attempt instead of accumulating deltas.
+      const targetOuter = window.outerWidth + (width - window.innerWidth);
+      const res = await send({ type: "resize", width: targetOuter, height }).catch(() => null);
+      await waitResize();
+      if (res?.unmaximized) {
+        await waitResize();
+        continue;
+      }
+      if (Math.abs(window.innerWidth - width) < 2) break;
+      // The window changed but the page's viewport did not: DevTools device emulation
+      // (or a window manager) is fixing the layout width; more attempts won't help.
+      if (window.outerWidth !== before.outer && window.innerWidth === before.inner) break;
+    }
+    return window.innerWidth;
+  }
+
+  async function blankThumbnail(width, height) {
+    const canvas = new OffscreenCanvas(400, Math.max(1, Math.round((400 * height) / Math.max(1, width))));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#f5f5f5";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
+  }
+
+  const stop = () => {
+    if (!cancelRequested) return;
+    const error = new Error("Захват отменён");
+    error.name = "AbortError";
+    throw error;
+  };
+
+  // One capture per width, merged side by side into a single .fig.
+  async function captureWidths(widths) {
+    const results = [];
+    const parts = [];
+    const logs = [];
+    let totalWidth = 0;
+    let totalHeight = 0;
+    const gap = 80;
+    try {
+      for (const width of widths) {
+        stop();
+        status(`Ширина ${width}px…`);
+        progressValue = Math.min(progressValue, 8);
+        progressCap = 10;
+        paintProgress();
+        const actual = await resizeToInner(width);
+        stop();
+        if (Math.abs(actual - width) > 2) {
+          const note = `Ширина ${width}px не применилась (окно осталось ${actual}px). Если открыт режим устройства в DevTools, отключите его и повторите захват.`;
+          logs.push(note);
+          addLog(note, "warn");
+          continue;
+        }
+        try {
+          const r = await capture(
+            {
+              layout: $(".abs").checked ? "absolute" : "auto",
+              hideSelectors: $(".exclude").checked ? $(".hide").value : "",
+              targets: targets.length ? targets : undefined,
+              visibleOnly: $(".visible").checked,
+              shouldCancel: () => cancelRequested,
+            },
+            { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
+          );
+          results.push(r);
+          parts.push({ message: r.debug.message, x: totalWidth, y: 0 });
+          totalWidth += r.width + gap;
+          totalHeight = Math.max(totalHeight, r.height);
+          logs.push(...r.log);
+        } catch (e) {
+          if (e?.name === "AbortError") throw e;
+          logs.push(`Ширина ${width}px: ${e.message || e}`);
+          addLog(`Ширина ${width}px: ${e.message || e}`, "err");
+        }
+      }
+      stop();
+      if (!results.length) throw new Error("Не удалось захватить ни одной ширины");
+      totalWidth = Math.max(1, totalWidth - gap);
+      totalHeight = Math.max(1, totalHeight);
+      const first = results[0];
+      const message = mergeMessages(parts);
+      const name = `${document.title || location.hostname} — ${results.map((r) => r.width).join(" / ")}px`;
+      const shot = (await thumbnail().catch(() => null)) || (await blankThumbnail(totalWidth, totalHeight));
+      return {
+        ...first,
+        name,
+        width: totalWidth,
+        height: totalHeight,
+        nodes: results.reduce((n, r) => n + r.nodes, 0),
+        images: results.reduce((n, r) => n + r.images, 0),
+        clipboardHtml: toClipboardHtml(message),
+        fig: toFigFile(message, { name, width: totalWidth, height: totalHeight, thumbnail: shot }),
+        log: [...new Set(logs)],
+        debug: {
+          ...first.debug,
+          message,
+          failures: results.flatMap((r) => r.debug.failures || []),
+          imageFailures: results.flatMap((r) => r.debug.imageFailures || []),
+          fontFailures: results.flatMap((r) => r.debug.fontFailures || []),
+          fixes: results.reduce((acc, r) => {
+            for (const [k, v] of Object.entries(r.debug.fixes || {})) if (typeof v === "number") acc[k] = (acc[k] || 0) + v;
+            return acc;
+          }, {}),
+        },
+      };
+    } finally {
+      await send({ type: "restore-window" }).catch(() => null);
+      await waitResize();
+    }
+  }
+
+  const runCapture = async () => {
     if (busy) return;
-    if (target && !target.isConnected) {
-      target = null;
+    if (targets.some((t) => !t.isConnected)) {
+      targets = targets.filter((t) => t.isConnected);
       updateTarget();
     }
     busy = true;
@@ -322,16 +678,31 @@ function createPanel() {
     startProgress();
     const t0 = Date.now();
     try {
-      result = await capture(
-        { layout: $(".abs").checked ? "absolute" : "auto", hideSelectors: $(".exclude").checked ? $(".hide").value : "", target: target || undefined },
-        { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
-      );
+      const widths = [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => Number(i.dataset.width));
+      const custom = Number($(".widthcustom").value);
+      if (Number.isFinite(custom) && custom >= 200 && custom <= 4000 && !widths.includes(custom)) widths.push(custom);
+      if (widths.length) {
+        result = await captureWidths(widths);
+      } else {
+        result = await capture(
+          {
+            layout: $(".abs").checked ? "absolute" : "auto",
+            hideSelectors: $(".exclude").checked ? $(".hide").value : "",
+            targets: targets.length ? targets : undefined,
+            visibleOnly: $(".visible").checked,
+            shouldCancel: () => cancelRequested,
+          },
+          { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
+        );
+      }
       finishProgress();
+      for (const line of result.log || []) addLog(line, /Не удалось|Не загрузились/.test(line) ? "warn" : "");
       console.info("site2figma: capture", JSON.stringify(result.debug.fixes), "fonts", JSON.stringify(result.debug.fonts));
       const notes = result.log.length ? " " + result.log.join(" ") : "";
-      const summary = `Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.`;
+      const summary = `Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.width}px, ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.`;
       $(".result").classList.remove("hidden");
       renderSvgList();
+      renderDiagnostics();
       status(`${summary} Копирую в буфер…`, "ok");
       const copied = await copyHtml(result.clipboardHtml).catch(() => false);
       if (copied) {
@@ -345,15 +716,23 @@ function createPanel() {
       }
       hideProgress(1200);
     } catch (e) {
-      console.error("site2figma", e);
-      stopProgress(0);
-      $(".progress").classList.add("hidden");
-      status("Ошибка: " + (e.message || e), "err");
+      if (e?.name === "AbortError") {
+        stopProgress(0);
+        $(".progresswrap").classList.add("hidden");
+        status("Захват отменён", "warn");
+      } else {
+        console.error("site2figma", e);
+        stopProgress(0);
+        $(".progresswrap").classList.add("hidden");
+        status("Ошибка: " + (e.message || e), "err");
+        if (e?.stack) addLog(String(e.stack), "err");
+      }
     } finally {
       busy = false;
       $(".go").disabled = false;
     }
-  });
+  };
+  $(".go").addEventListener("click", runCapture);
 
   const saveFile = (bytes, filename) => {
     const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
@@ -415,6 +794,26 @@ function createPanel() {
     }
   }
 
+  function renderDiagnostics() {
+    const d = result?.debug || {};
+    const rows = [
+      ...(d.failures || []).map((x) => ["Элемент", x]),
+      ...(d.imageFailures || []).map((x) => ["Картинка", x]),
+      ...(d.fontFailures || []).map((x) => ["Шрифт", x]),
+    ];
+    const box = $(".diag");
+    box.classList.toggle("hidden", !rows.length);
+    const list = $(".diaglist");
+    list.textContent = "";
+    for (const [kind, text] of rows) {
+      const row = document.createElement("div");
+      row.className = "diagrow";
+      row.textContent = `${kind}: ${text}`;
+      list.append(row);
+      addLog(`${kind}: ${text}`, "err");
+    }
+  }
+
   $(".copy").addEventListener("click", async () => {
     if (!result) return;
     const ok = await copyHtml(result.clipboardHtml);
@@ -424,10 +823,14 @@ function createPanel() {
   });
 
   // ---- Tabs ----
+  const selectTab = (name) => {
+    for (const b of root.querySelectorAll(".tabs button")) b.classList.toggle("active", b.dataset.tab === name);
+    for (const t of root.querySelectorAll(".tab")) t.classList.toggle("hidden", !t.classList.contains("tab-" + name));
+  };
   for (const btn of root.querySelectorAll(".tabs button")) {
     btn.addEventListener("click", () => {
-      for (const b of root.querySelectorAll(".tabs button")) b.classList.toggle("active", b === btn);
-      for (const t of root.querySelectorAll(".tab")) t.classList.toggle("hidden", !t.classList.contains("tab-" + btn.dataset.tab));
+      selectTab(btn.dataset.tab);
+      saveSettings();
     });
   }
 
@@ -443,6 +846,7 @@ function createPanel() {
   const mstatus = (text, cls = "") => {
     $(".mstatus").className = "status mstatus " + cls;
     $(".mstatus").textContent = text;
+    addLog(text, cls);
   };
   const kindEnabled = (kind) => root.querySelector(`.kinds input[data-kind="${kind}"]`).checked;
   const selected = () => media.filter((m) => m.checked && kindEnabled(m.kind));
@@ -551,6 +955,7 @@ function createPanel() {
   const fstatus = (text, cls = "") => {
     $(".fstatus").className = "status fstatus " + cls;
     $(".fstatus").textContent = text;
+    addLog(text, cls);
   };
   const selectedFonts = () => fontFiles.filter((f) => f.checked);
   const updateSaveFonts = () => {
@@ -638,12 +1043,32 @@ function createPanel() {
     else if (!busy) host.style.display = "none";
   };
   $(".close").addEventListener("click", toggle);
-  return { toggle };
+  return {
+    toggle,
+    capture: () => {
+      host.style.display = "";
+      runCapture();
+    },
+    pick: () => {
+      host.style.display = "";
+      startPick();
+    },
+  };
 }
 
 // Bootstrap last: everything above (styles, helpers) must be initialised first.
-if (window.__s2fPanel) {
-  window.__s2fPanel.toggle();
-} else {
-  window.__s2fPanel = createPanel();
+if (!window.__s2fPanel) window.__s2fPanel = createPanel();
+if (!window.__s2fMessages) {
+  window.__s2fMessages = true;
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === "s2f-ping") {
+      sendResponse({ ok: true });
+      return;
+    }
+    const panel = window.__s2fPanel;
+    if (!panel) return;
+    if (msg.type === "s2f-toggle") panel.toggle();
+    else if (msg.type === "s2f-capture") panel.capture();
+    else if (msg.type === "s2f-pick") panel.pick();
+  });
 }

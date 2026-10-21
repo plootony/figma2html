@@ -50,26 +50,41 @@ export async function closeBrowser() {
 }
 
 // Network for the in-page pipeline: Node has no CORS limits.
-async function netFetch(url, kind, referer) {
-  try {
-    const headers = { Referer: referer };
-    // A non-browser UA makes Google Fonts return one TTF per style instead of woff2 subsets.
-    if (!url.startsWith("https://fonts.googleapis.com/")) headers["User-Agent"] = UA;
-    const res = await fetch(url, { headers });
-    if (!res.ok) return { error: `HTTP ${res.status}` };
-    if (kind === "text") return { text: await res.text() };
-    const buf = Buffer.from(await res.arrayBuffer());
-    return { b64: buf.toString("base64"), mime: (res.headers.get("content-type") || "application/octet-stream").split(";")[0].trim() };
-  } catch (e) {
-    return { error: String(e.message || e) };
+async function netOnce(url, kind, referer, timeout = 15000) {
+  const headers = { Referer: referer };
+  // A non-browser UA makes Google Fonts return one TTF per style instead of woff2 subsets.
+  if (!url.startsWith("https://fonts.googleapis.com/")) headers["User-Agent"] = UA;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeout) });
+  if (!res.ok) {
+    const err = new Error(`HTTP ${res.status}`);
+    err.retry = res.status >= 500 || res.status === 429;
+    throw err;
   }
+  if (kind === "text") return { text: await res.text() };
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { b64: buf.toString("base64"), mime: (res.headers.get("content-type") || "application/octet-stream").split(";")[0].trim() };
+}
+
+async function netFetch(url, kind, referer) {
+  let last;
+  for (let i = 0; i < 2; i++) {
+    try {
+      return await netOnce(url, kind, referer);
+    } catch (e) {
+      last = e;
+      if (e.retry === false || i === 1) break;
+      await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+    }
+  }
+  return { error: String(last?.message || last) };
 }
 
 // Scroll through the page so lazy-loaded images and sections render.
 async function autoScroll(page) {
   await page.evaluate(async () => {
     const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
-    for (let y = 0; y < document.documentElement.scrollHeight && y < 60000; y += step) {
+    const stopAt = Date.now() + 30000;
+    for (let y = 0; y < document.documentElement.scrollHeight && y < 60000 && Date.now() < stopAt; y += step) {
       window.scrollTo(0, y);
       await new Promise((r) => setTimeout(r, 120));
     }
@@ -84,7 +99,7 @@ const FREEZE_CSS = `*,*::before,*::after{animation-duration:0s!important;animati
  * Capture a page. Returns { name, height, fig (Buffer), clipboardHtml, nodes, images, log, debug, trace? }.
  * `inspect(page, trace)` (optional, verify.mjs) runs on the live page after the capture.
  */
-export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", inspect }) {
+export async function capturePage({ url, width, layout = "auto", hideSelectors = "", targetSelector = "", targetSelectors = [], visibleOnly = false, inspect }) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   const log = [];
@@ -111,20 +126,23 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
     await page.waitForNetworkIdle({ idleTime: 800, concurrency: 2, timeout: 10000 }).catch(() => {});
     await page.addStyleTag({ content: FREEZE_CSS });
     stage("network idle");
-    await autoScroll(page);
+    if (!visibleOnly) await autoScroll(page);
     stage("scrolled");
     await page.waitForNetworkIdle({ idleTime: 800, concurrency: 2, timeout: 8000 }).catch(() => {});
 
     const height = await page.evaluate(() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
-    const targetRect = targetSelector
-      ? await page.evaluate((sel) => {
+    const selectors = targetSelectors.length ? targetSelectors : targetSelector ? [targetSelector] : [];
+    const targetRects = selectors.length
+      ? await page.evaluate((list) => list.map((sel) => {
           const el = document.querySelector(sel);
           if (!el) return null;
           const r = el.getBoundingClientRect();
           return { x: r.x + window.scrollX, y: r.y + window.scrollY, width: r.width, height: r.height };
-        }, targetSelector)
-      : null;
-    if (targetSelector && (!targetRect || targetRect.width < 1 || targetRect.height < 1)) throw new Error(`Блок не найден или не виден: ${targetSelector}`);
+        }), selectors)
+      : [];
+    const missing = selectors.filter((_, i) => !targetRects[i] || targetRects[i].width < 1 || targetRects[i].height < 1);
+    if (missing.length) throw new Error(`Блок не найден или не виден: ${missing.join(", ")}`);
+    const targetRect = targetRects[0] || null;
     stage("before thumbnail");
     const thumbnail = await page.screenshot({
       type: "png",
@@ -143,7 +161,8 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
         res = await page.evaluate((opts) => window.__s2fCapture(opts), {
           layout,
           hideSelectors,
-          targetSelector,
+          targetSelectors: selectors,
+          visibleOnly,
           thumbnailB64: Buffer.from(thumbnail).toString("base64"),
           withTrace: Boolean(inspect),
         });

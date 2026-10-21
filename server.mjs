@@ -9,13 +9,13 @@ const PORT = Number(process.env.PORT) || 4747;
 const OUT_DIR = path.join(ROOT, "output");
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
-async function capture({ url, width, layout, hideSelectors, targetSelector }) {
-  const r = await capturePage({ url, width, layout, hideSelectors, targetSelector });
+async function capture({ url, width, layout, hideSelectors, targetSelector, targetSelectors, visibleOnly }) {
+  const r = await capturePage({ url, width, layout, hideSelectors, targetSelector, targetSelectors, visibleOnly });
   const base = `${new URL(url).hostname}_${width}_${Date.now()}`;
   fs.writeFileSync(path.join(OUT_DIR, base + ".html"), r.clipboardHtml);
   fs.writeFileSync(path.join(OUT_DIR, base + ".fig"), r.fig);
   if (r.svgZipB64) fs.writeFileSync(path.join(OUT_DIR, base + "_svg.zip"), Buffer.from(r.svgZipB64, "base64"));
-  return { base, name: r.name, height: r.height, figSize: r.fig.length, nodes: r.nodes, images: r.images, svgCount: r.svgCount, log: r.log };
+  return { base, name: r.name, width: r.width, height: r.height, figSize: r.fig.length, nodes: r.nodes, images: r.images, svgCount: r.svgCount, log: r.log, diagnostics: { failures: r.debug?.failures || [], imageFailures: r.debug?.imageFailures || [], fontFailures: r.debug?.fontFailures || [] } };
 }
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
@@ -77,7 +77,7 @@ const server = http.createServer(async (req, res) => {
       const results = [];
       for (const width of widths) {
         const t = Date.now();
-        const r = await capture({ url, width, layout, hideSelectors: body.hideSelectors, targetSelector: body.targetSelector });
+        const r = await capture({ url, width, layout, hideSelectors: body.hideSelectors, targetSelector: body.targetSelector, targetSelectors: Array.isArray(body.targetSelectors) ? body.targetSelectors : [], visibleOnly: Boolean(body.visibleOnly) });
         console.log(`[ok] ${url} @${width}px → ${r.base} (${((Date.now() - t) / 1000).toFixed(1)}s)`);
         results.push(r);
       }

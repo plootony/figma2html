@@ -53,6 +53,7 @@
       <label><input type="checkbox" name="w" value="768"> Tablet 768</label>
       <label><input type="checkbox" name="w" value="390"> Mobile 390</label>
       <label><input type="checkbox" id="abs"> Без auto layout</label>
+      <label><input type="checkbox" id="visible"> Только видимая часть</label>
     </div>
     <details>
       <summary>Убрать элементы перед захватом (cookie-баннеры, чаты…)</summary>
@@ -169,7 +170,7 @@ $("#f").onsubmit = async (e) => {
     const r = await fetch("/capture", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, widths, layout: $("#abs").checked ? "absolute" : "auto", hideSelectors: $("#hide").value, targetSelector: $("#target").value.trim() }),
+      body: JSON.stringify({ url, widths, layout: $("#abs").checked ? "absolute" : "auto", hideSelectors: $("#hide").value, targetSelector: $("#target").value.trim(), visibleOnly: $("#visible").checked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);

@@ -263,6 +263,47 @@ export async function optimizeImages(message, resize, scale = 2) {
   return { before, after };
 }
 
+// Merge several single-frame conversions into one canvas: each part becomes a root frame
+// at its own (x, y). GUIDs and image blob indices are remapped so nothing collides.
+export function mergeMessages(parts) {
+  if (parts.length === 1) return parts[0].message;
+  const key = (g) => `${g.sessionID}:${g.localID}`;
+  const onCanvas = (n) => n.parentIndex?.guid?.sessionID === 0 && n.parentIndex?.guid?.localID === 1;
+  const out = parts[0].message;
+  out.nodeChanges = [...out.nodeChanges];
+  out.blobs = [...(out.blobs || [])];
+  for (const n of out.nodeChanges) {
+    if (n.type === "FRAME" && onCanvas(n)) n.transform = { ...n.transform, m02: (n.transform?.m02 || 0) + (parts[0].x || 0), m12: (n.transform?.m12 || 0) + (parts[0].y || 0) };
+  }
+  let maxId = Math.max(...out.nodeChanges.map((n) => (n.guid.sessionID === 0 ? n.guid.localID : 0)));
+
+  for (let i = 1; i < parts.length; i++) {
+    const msg = parts[i].message;
+    const blobBase = out.blobs.length;
+    out.blobs.push(...(msg.blobs || []));
+    const map = new Map();
+    for (const n of msg.nodeChanges) {
+      if (n.type === "DOCUMENT" || n.type === "CANVAS") continue;
+      map.set(key(n.guid), { sessionID: 0, localID: ++maxId });
+    }
+    for (const n of msg.nodeChanges) {
+      if (n.type === "DOCUMENT" || n.type === "CANVAS") continue;
+      const copy = structuredClone(n);
+      copy.guid = map.get(key(n.guid));
+      if (copy.parentIndex?.guid) copy.parentIndex.guid = map.get(key(copy.parentIndex.guid)) || { sessionID: 0, localID: 1 };
+      for (const p of [...(copy.fillPaints || []), ...(copy.strokePaints || [])]) {
+        if (p.type === "IMAGE" && p.image?.dataBlob != null) p.image.dataBlob += blobBase;
+      }
+      if (n.type === "FRAME" && onCanvas(n)) {
+        copy.parentIndex = { guid: { sessionID: 0, localID: 1 }, position: "!" };
+        copy.transform = { ...copy.transform, m02: (n.transform?.m02 || 0) + (parts[i].x || 0), m12: (n.transform?.m12 || 0) + (parts[i].y || 0) };
+      }
+      out.nodeChanges.push(copy);
+    }
+  }
+  return out;
+}
+
 export function stats(message) {
   const s = { nodes: message.nodeChanges.length, images: 0 };
   for (const n of message.nodeChanges) for (const p of n.fillPaints || []) if (p.type === "IMAGE") s.images++;

@@ -13,13 +13,17 @@ const SOLO_CSS =
   "html[data-s2f-solo-mode] *:not([data-s2f-solo]){visibility:hidden!important}" +
   "html[data-s2f-solo-mode] [data-s2f-solo]{visibility:visible!important}";
 
-/** Screenshot every visible canvas/video inside `root`. Returns Map(element → PNG bytes). */
+/** Screenshot every visible canvas/video inside `root` (and its descendants). */
 export async function snapshotMediaElements(captureViewport, root = document.body) {
   const result = new Map();
   if (!captureViewport) return result;
-  const found = root === document.body ? [...document.body.querySelectorAll("canvas, video")] : [...root.querySelectorAll("canvas, video")];
-  if (root.matches?.("canvas, video")) found.unshift(root);
-  const targets = found.filter((el) => {
+  const roots = Array.isArray(root) ? root : [root];
+  const found = [];
+  for (const r of roots) {
+    found.push(...r.querySelectorAll("canvas, video"));
+    if (r.matches?.("canvas, video")) found.unshift(r);
+  }
+  const targets = [...new Set(found)].filter((el) => {
     const r = el.getBoundingClientRect();
     return r.width >= 16 && r.height >= 16 && getComputedStyle(el).visibility !== "hidden";
   });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Site to Figma",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Конвертирует открытую страницу в редактируемый дизайн Figma (файл .fig или вставка через буфер) и скачивает все медиа страницы.",
   "action": {
     "default_title": "Site to Figma — захватить страницу",
@@ -21,11 +21,22 @@
   "background": {
     "service_worker": "background.js"
   },
+  "commands": {
+    "capture-page": {
+      "suggested_key": { "default": "Alt+Shift+C" },
+      "description": "Захватить всю страницу"
+    },
+    "pick-block": {
+      "suggested_key": { "default": "Alt+Shift+X" },
+      "description": "Выбрать блок на странице"
+    }
+  },
   "permissions": [
     "activeTab",
     "scripting",
     "clipboardWrite",
-    "downloads"
+    "downloads",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"

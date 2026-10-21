@@ -16,13 +16,29 @@ import { addBackgroundImages, hasUrlBackground } from "./backgrounds.js";
 import { prepareSvgImages, resolveSvgUses, rasterizeSvg, isSvgUrl, fileName } from "./svg.js";
 import { snapshotMediaElements, applySnapshots } from "./snapshots.js";
 import { zipSync, strToU8 } from "fflate";
-import { decodePayload, sanitize, fixBlankGlyphs, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile } from "./post.js";
+import { decodePayload, sanitize, fixBlankGlyphs, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile, mergeMessages } from "./post.js";
 
 // Elements that never paint themselves (the converter tried to turn <source> into a frame and failed).
 const NON_RENDERED = new Set(["source", "track", "param", "area", "map", "datalist", "option", "optgroup", "base", "wbr"]);
 const ICON_FONT = /icon|awesome|lucide|material|symbol|glyph|feather|remix|ionic|dashicons|^fa[-\s]/i;
 const TEXT_CHAR = /[\p{L}\p{N}]/u;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const rootsOf = (root) => (Array.isArray(root) ? root : [root]);
+const subtreeMany = (root) => [...new Set(rootsOf(root).flatMap((r) => [r, ...r.querySelectorAll("*")]))];
+
+// Repeated captures on the same page (extension) reuse fonts/images already downloaded.
+const NET_CACHE = new Map();
+const NET_CACHE_LIMIT = 200;
+function cachedNet(kind, url, load) {
+  const key = `${kind} ${url}`;
+  if (NET_CACHE.has(key)) return NET_CACHE.get(key);
+  const promise = load();
+  NET_CACHE.set(key, promise);
+  promise.catch(() => NET_CACHE.delete(key));
+  while (NET_CACHE.size > NET_CACHE_LIMIT) NET_CACHE.delete(NET_CACHE.keys().next().value);
+  return promise;
+}
 
 // Every inline-style change made for the capture is recorded and rolled back afterwards,
 // so the live page (extension) is left as it was.
@@ -65,10 +81,13 @@ const describe = (el) => {
   return tag + id + cls;
 };
 
-// Scroll through the page so lazy-loaded images and sections render.
-async function autoScroll() {
+// Scroll through the page so lazy-loaded images and sections render. Capped in time so a
+// very long page can't stall the capture forever.
+async function autoScroll(shouldCancel) {
   const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
-  for (let y = 0; y < document.documentElement.scrollHeight && y < 60000; y += step) {
+  const stopAt = Date.now() + 30000;
+  for (let y = 0; y < document.documentElement.scrollHeight && y < 60000 && Date.now() < stopAt; y += step) {
+    shouldCancel?.();
     window.scrollTo(0, y);
     await wait(120);
   }
@@ -104,7 +123,7 @@ export function materializePseudoElements(journal, root = document.body) {
   hideRule.textContent =
     "[data-s2f-before]::before{content:none!important;display:none!important}[data-s2f-after]::after{content:none!important;display:none!important}";
   const created = [];
-  for (const host of subtree(root)) {
+  for (const host of subtreeMany(root)) {
     if (NO_PSEUDO.has(host.tagName.toUpperCase()) || host.closest("svg")) continue;
     for (const which of ["before", "after"]) {
       const cs = getComputedStyle(host, "::" + which);
@@ -167,7 +186,7 @@ async function collectFontFaces(net) {
 // replaced with similar Google fonts in the page itself, so the browser layout and the
 // Figma file use the same, available font. Icon fonts are left alone.
 async function substituteFonts(chars, fonts, journal, bundledFont, root = document.body) {
-  const elements = subtree(root);
+  const elements = subtreeMany(root);
   const stacks = new Set();
   for (const el of elements) if (isTextElement(el)) stacks.add(getComputedStyle(el).fontFamily);
   const plan = {};
@@ -248,7 +267,7 @@ function normalizeTypography(journal, root = document.body) {
     return cache.get(key);
   };
   const ALIGN = { start: "left", "-webkit-left": "left", end: "right", "-webkit-right": "right", "-webkit-center": "center" };
-  for (const el of subtree(root)) {
+  for (const el of subtreeMany(root)) {
     if (el === probe || !isTextElement(el)) continue;
     const cs = getComputedStyle(el);
     const fontSize = parseFloat(cs.fontSize);
@@ -447,19 +466,40 @@ async function placeholderThumbnail(width, height) {
 export async function capture(options, env) {
   // keepModified: leave the prepared DOM in place (verify.mjs inspects it); call the
   // returned `restore()` afterwards.
-  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false } = options;
+  const { layout = "auto", hideSelectors = "", scroll = true, freezeAnimations = true, keepModified = false, visibleOnly = false } = options;
   const progress = env.progress || (() => {});
-  const net = env.net;
+  const cancel = () => {
+    if (!options.shouldCancel?.()) return;
+    const error = new Error("Захват отменён");
+    error.name = "AbortError";
+    throw error;
+  };
+  const net = {
+    text: (url) => cachedNet("text", url, () => env.net.text(url)),
+    get: (url) => cachedNet("get", url, () => env.net.get(url)),
+  };
   const fonts = createFontLoader(net, env.bundledFont);
   const journal = createStyleJournal();
   const log = [];
   const t0 = Date.now();
   const startScroll = window.scrollY;
-  const target = options.target?.isConnected ? options.target : options.targetSelector ? document.querySelector(options.targetSelector) : document.body;
-  if (!target) throw new Error(`Блок не найден: ${options.targetSelector}`);
-  const block = target !== document.body;
-  globalThis.__s2fCaptureRoot = target;
+
+  const selectors = options.targetSelectors?.length ? options.targetSelectors : options.targetSelector ? [options.targetSelector] : [];
+  let roots = (options.targets?.length ? options.targets : selectors.map((sel) => document.querySelector(sel)))
+    .filter((el) => el?.isConnected);
+  if (selectors.length && roots.length < selectors.length) {
+    const missing = selectors.filter((sel) => !document.querySelector(sel));
+    throw new Error(`Блок не найден: ${missing.join(", ")}`);
+  }
+  if (!roots.length) roots = [document.body];
+  if (roots.some((el) => el === document.body || el === document.documentElement)) roots = [document.body];
+  roots = [...new Set(roots)].filter((el) => !roots.some((other) => other !== el && other.contains(el)));
+  const block = !(roots.length === 1 && roots[0] === document.body);
+  const wholePage = !block;
+  globalThis.__s2fCaptureRoot = roots[0];
+
   try {
+    cancel();
     if (freezeAnimations) {
       // Elements are captured in their final state, not mid-animation.
       const style = document.createElement("style");
@@ -467,10 +507,11 @@ export async function capture(options, env) {
       document.head.appendChild(style);
       journal.add(style);
     }
-    if (scroll) {
+    if (scroll && !visibleOnly) {
       progress("Прокрутка страницы…");
-      await autoScroll();
+      await autoScroll(cancel);
     }
+    cancel();
     await Promise.race([document.fonts.ready, wait(5000)]);
 
     for (const sel of hideSelectors.split(",").map((s) => s.trim()).filter(Boolean)) {
@@ -482,42 +523,84 @@ export async function capture(options, env) {
     // Before any DOM changes: temporary elements carry inline !important styles that the
     // "hide everything else" rule of the snapshot can't override.
     progress("Снимки canvas/видео…");
-    const snapshots = await snapshotMediaElements(env.captureViewport, target);
+    cancel();
+    const snapshots = await snapshotMediaElements(env.captureViewport, roots);
+    cancel();
 
-    const pseudo = materializePseudoElements(journal, target);
-    const whitespace = collapseWhitespace(journal, target);
+    const pseudo = materializePseudoElements(journal, roots);
+    let whitespace = 0;
+    for (const root of roots) whitespace += collapseWhitespace(journal, root);
     progress("SVG…");
-    const svgUses = await resolveSvgUses(journal, net, target);
-    const svgs = await prepareSvgImages(journal, net, target);
+    cancel();
+    let svgUses = 0;
+    let svgInlined = 0;
+    const svgOriginals = new Map();
+    for (const root of roots) {
+      svgUses += await resolveSvgUses(journal, net, root);
+      const svgs = await prepareSvgImages(journal, net, root);
+      svgInlined += svgs.inlined;
+      for (const [url, original] of svgs.originals) if (!svgOriginals.has(url)) svgOriginals.set(url, original);
+      cancel();
+    }
 
     progress("Шрифты…");
     let text = "";
-    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) text += walker.currentNode.textContent;
-    for (const el of [target, ...target.querySelectorAll("input, textarea")]) {
-      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") text += (el.placeholder || "") + (el.value || "");
+    for (const root of roots) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) text += walker.currentNode.textContent;
+      for (const el of [root, ...root.querySelectorAll("input, textarea")]) {
+        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") text += (el.placeholder || "") + (el.value || "");
+      }
     }
     const chars = charsetOf(text);
     const pageFaces = await collectFontFaces(net);
-    const substitutions = await substituteFonts(chars, fonts, journal, env.bundledFont, target);
+    cancel();
+    const substitutions = await substituteFonts(chars, fonts, journal, env.bundledFont, roots);
     if (substitutions.length) log.push("Замена шрифтов: " + substitutions.join(", "));
-    normalizeTypography(journal, target);
+    normalizeTypography(journal, roots);
 
-    const rect = target.getBoundingClientRect();
-    const width = block ? Math.max(1, Math.round(rect.width)) : document.documentElement.clientWidth;
-    const height = block ? Math.max(1, Math.round(rect.height)) : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-    if (block && (!rect.width || !rect.height)) throw new Error("Выбранный блок не виден на странице (нулевой размер)");
+    const title = document.title || location.hostname;
     const viewportHeight = Math.max(1, Math.round(window.innerHeight));
-    const name = block ? `${document.title || location.hostname} — ${describe(target)} — ${width}px` : `${document.title || location.hostname} — ${width}px`;
-    if (block) {
-      target.scrollIntoView({ block: "start", inline: "nearest" });
-      await wait(100);
-    } else window.scrollTo(0, 0);
-    const thumbnail = (env.thumbnail && (await env.thumbnail().catch(() => null))) || (await placeholderThumbnail(width, Math.min(height, width * 0.625)));
-    window.scrollTo(0, 0);
+    let frames;
+    if (wholePage) {
+      const width = document.documentElement.clientWidth;
+      const height = visibleOnly ? viewportHeight : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      frames = [{ element: document.body, width, height: Math.max(1, Math.round(height)), name: `${title} — ${width}px` }];
+    } else {
+      frames = roots.map((element) => {
+        const rect = element.getBoundingClientRect();
+        if (!rect.width || !rect.height) throw new Error(`Блок ${describe(element)} не виден на странице (нулевой размер)`);
+        const width = Math.max(1, Math.round(rect.width));
+        return { element, width, height: Math.max(1, Math.round(rect.height)), name: `${title} — ${describe(element)} — ${width}px` };
+      });
+    }
+    const GAP = 80;
+    let offsetX = 0;
+    for (const frame of frames) {
+      frame.x = offsetX;
+      frame.y = 0;
+      offsetX += frame.width + GAP;
+    }
+    const totalWidth = Math.max(1, offsetX - GAP);
+    const totalHeight = Math.max(1, ...frames.map((f) => f.height));
+    const name = frames.length === 1 ? frames[0].name : `${title} — блоки: ${frames.length} — ${totalWidth}px`;
+
+    cancel();
+    let thumbnail = null;
+    if (frames.length === 1) {
+      if (!wholePage) {
+        frames[0].element.scrollIntoView({ block: "start", inline: "nearest" });
+        await wait(100);
+      } else window.scrollTo(0, 0);
+      thumbnail = env.thumbnail ? await env.thumbnail().catch(() => null) : null;
+      window.scrollTo(0, 0);
+    }
+    if (!thumbnail) thumbnail = await placeholderThumbnail(totalWidth, Math.min(totalHeight, totalWidth * 0.625));
 
     progress("Конвертация…");
     const fontSources = new Map();
+    const fontFailures = [];
+    const imageFailures = [];
     const converter = createFigmaConverter({
       layout,
       trace: true,
@@ -525,76 +608,112 @@ export async function capture(options, env) {
       classify: (el, kind) =>
         NON_RENDERED.has(el.tagName.toLowerCase()) ? "skip" : kind === "text" && hasUrlBackground(el) ? "frame" : kind,
       fontLoader: async (req) => {
+        cancel();
         const r = await fonts.load(req, chars, pageFaces);
         fontSources.set(`${req.family} ${req.weight}${req.italic ? "i" : ""}`, r.error ? "нет" : r.source);
-        if (r.error) throw new Error(r.error);
+        if (r.error) {
+          fontFailures.push(`${req.family} ${req.weight}${req.italic ? " italic" : ""}: ${r.error}`);
+          throw new Error(r.error);
+        }
         return { bytes: base64ToBytes(r.b64).buffer, resolvedWeight: r.weight, resolvedItalic: r.italic, ...(r.family && { resolvedFamily: r.family }) };
       },
       imageLoader: async ({ src, element }) => {
-        let bytes, mimeType;
-        if (src.startsWith("data:")) {
-          const res = await fetch(src);
-          bytes = new Uint8Array(await res.arrayBuffer());
-          mimeType = res.headers.get("content-type") || "image/png";
-        } else {
-          const r = await net.get(src);
-          bytes = base64ToBytes(r.b64);
-          mimeType = r.mime;
+        cancel();
+        try {
+          let bytes, mimeType;
+          if (src.startsWith("data:")) {
+            const res = await fetch(src);
+            bytes = new Uint8Array(await res.arrayBuffer());
+            mimeType = res.headers.get("content-type") || "image/png";
+          } else {
+            const r = await net.get(src);
+            bytes = base64ToBytes(r.b64);
+            mimeType = r.mime;
+          }
+          if (mimeType.includes("svg") || isSvgUrl(src)) {
+            // Complex SVG kept as an image: rasterise at 2× its displayed size, not its natural size.
+            const rect = element.getBoundingClientRect();
+            bytes = await rasterizeSvg(bytes, rect.width || 100, rect.height || 100);
+            mimeType = "image/png";
+          }
+          return { bytes: bytes.buffer, mimeType };
+        } catch (e) {
+          imageFailures.push(`${src.slice(0, 160)}: ${String(e?.message || e).slice(0, 120)}`);
+          throw e;
         }
-        if (mimeType.includes("svg") || isSvgUrl(src)) {
-          // Complex SVG kept as an image: rasterise at 2× its displayed size, not its natural size.
-          const rect = element.getBoundingClientRect();
-          bytes = await rasterizeSvg(bytes, rect.width || 100, rect.height || 100);
-          mimeType = "image/png";
-        }
-        return { bytes: bytes.buffer, mimeType };
       },
     });
-    globalThis.__s2fErrors = [];
-    const rootTop = target.getBoundingClientRect().top;
-    globalThis.__s2fRootAtOrigin = block;
-    let result;
-    try {
-      result = await converter.convert({ element: target, width, height, name });
-    } finally {
-      delete globalThis.__s2fRootAtOrigin;
-    }
 
-    // Elements the converter failed on (kept as plain frames with their content).
-    const failures = (globalThis.__s2fErrors || []).map(({ node, error }) => {
-      const el = node.nodeType === 1 ? node : node.parentElement;
-      const cls = el && typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".") : "";
-      return `${el ? el.tagName.toLowerCase() + cls : "#text"}: ${String(error?.message || error).slice(0, 160)}`;
-    });
+    const parts = [];
+    const failures = [];
+    const fixes = { nan: 0, glyphs: 0, lineBoxes: 0, backgrounds: 0, snapshots: 0, svgNamed: 0, hugWithFill: 0, siblingGroups: 0, scrollBehavior: 0, prototypeDevice: 0 };
+    const images = { before: 0, after: 0 };
+    let trace;
+    for (let i = 0; i < frames.length; i++) {
+      cancel();
+      const frame = frames[i];
+      if (frames.length > 1) progress(`Конвертация ${i + 1}/${frames.length}…`);
+      globalThis.__s2fCaptureRoot = frame.element;
+      globalThis.__s2fErrors = [];
+      const rootTop = frame.element.getBoundingClientRect().top;
+      globalThis.__s2fRootAtOrigin = frame.element !== document.body;
+      let result;
+      try {
+        result = await converter.convert({ element: frame.element, width: frame.width, height: frame.height, name: frame.name });
+      } finally {
+        delete globalThis.__s2fRootAtOrigin;
+      }
+      trace = result.trace;
+      cancel();
+
+      // Elements the converter failed on (kept as plain frames with their content).
+      const label = frames.length > 1 ? `[${describe(frame.element)}] ` : "";
+      for (const { node, error } of globalThis.__s2fErrors || []) {
+        const el = node.nodeType === 1 ? node : node.parentElement;
+        const cls = el && typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".") : "";
+        failures.push(`${label}${el ? el.tagName.toLowerCase() + cls : "#text"}: ${String(error?.message || error).slice(0, 160)}`);
+      }
+
+      progress("Обработка…");
+      cancel();
+      const message = decodePayload(result.base64);
+      const one = {
+        nan: sanitize(message),
+        glyphs: fixBlankGlyphs(message),
+        lineBoxes: alignTextBoxesToLineBox(message, result.trace, rootTop),
+        backgrounds: await addBackgroundImages(message, result.trace, net, resolveTraceElement),
+        snapshots: applySnapshots(message, result.trace, snapshots, resolveTraceElement),
+        svgNamed: nameSvgImages(message, result.trace, svgOriginals),
+        hugWithFill: fixAutoLayoutSizing(message),
+        siblingGroups: fixSiblingOrder(message),
+        scrollBehavior: markScrollBehavior(message, result.trace),
+        prototypeDevice: setPrototypeDevice(message, { width: frame.width, height: viewportHeight }),
+      };
+      for (const [k, v] of Object.entries(one)) fixes[k] = (fixes[k] || 0) + v;
+      fixTextLayout(message);
+      const resized = await optimizeImages(message, resizeImage);
+      images.before += resized.before;
+      images.after += resized.after;
+      parts.push({ message, x: frame.x, y: frame.y });
+      cancel();
+    }
+    fixes.pseudo = pseudo;
+    fixes.whitespace = whitespace;
+    fixes.svgInlined = svgInlined;
+    fixes.svgUses = svgUses;
+
+    cancel();
+    const message = mergeMessages(parts);
     if (failures.length) {
       log.push(`Не удалось полностью перенести элементов: ${failures.length} (их содержимое сохранено). Первая ошибка — ${failures[0]}`);
       console.warn("site2figma: conversion errors", failures);
     }
-
-    progress("Обработка…");
-    const message = decodePayload(result.base64);
-    const fixes = {
-      nan: sanitize(message),
-      glyphs: fixBlankGlyphs(message),
-      lineBoxes: alignTextBoxesToLineBox(message, result.trace, rootTop),
-      pseudo,
-      whitespace,
-      backgrounds: await addBackgroundImages(message, result.trace, net, resolveTraceElement),
-      svgInlined: svgs.inlined,
-      svgUses,
-      snapshots: applySnapshots(message, result.trace, snapshots, resolveTraceElement),
-      svgNamed: nameSvgImages(message, result.trace, svgs.originals),
-      hugWithFill: fixAutoLayoutSizing(message),
-      siblingGroups: fixSiblingOrder(message),
-      scrollBehavior: markScrollBehavior(message, result.trace),
-      prototypeDevice: setPrototypeDevice(message, { width, height: viewportHeight }),
-    };
-    fixTextLayout(message);
-    const images = await optimizeImages(message, resizeImage);
+    if (imageFailures.length) log.push(`Не загрузились картинки: ${imageFailures.length}. Первая — ${imageFailures[0]}`);
+    if (fontFailures.length) log.push(`Не загрузились шрифты: ${fontFailures.length}. Первый — ${fontFailures[0]}`);
 
     // Originals of the SVGs kept as images, for dropping into Figma by hand.
     const svgFiles = {};
-    for (const { name, text } of svgs.originals.values()) {
+    for (const { name, text } of svgOriginals.values()) {
       let unique = name;
       for (let i = 2; svgFiles[unique]; i++) unique = name.replace(/(\.svg)?$/i, `-${i}.svg`);
       svgFiles[unique] = strToU8(text);
@@ -602,22 +721,33 @@ export async function capture(options, env) {
     const svgZip = Object.keys(svgFiles).length ? zipSync(svgFiles) : null;
 
     const clipboardHtml = toClipboardHtml(message);
-    const fig = toFigFile(message, { name, thumbnail, width, height });
+    const fig = toFigFile(message, { name, thumbnail, width: totalWidth, height: totalHeight });
     return {
       name,
-      width,
-      height,
+      width: totalWidth,
+      height: totalHeight,
       fig,
       clipboardHtml,
       svgZip,
-      svgCount: svgs.originals.size,
-      svgOriginals: [...svgs.originals.values()].map(({ name, text }) => ({ name, text })),
+      svgCount: svgOriginals.size,
+      svgOriginals: [...svgOriginals.values()].map(({ name, text }) => ({ name, text })),
       log,
       ...stats(message),
-      debug: { failures, seconds: (Date.now() - t0) / 1000, fixes, images, fonts: Object.fromEntries(fontSources), message, trace: result.trace },
+      debug: {
+        failures,
+        imageFailures,
+        fontFailures,
+        seconds: (Date.now() - t0) / 1000,
+        fixes,
+        images,
+        fonts: Object.fromEntries(fontSources),
+        message,
+        trace: frames.length === 1 ? trace : undefined,
+      },
     };
   } finally {
     delete globalThis.__s2fCaptureRoot;
+    delete globalThis.__s2fRootAtOrigin;
     const restore = () => {
       journal.restore();
       window.scrollTo(0, startScroll);
