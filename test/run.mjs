@@ -281,6 +281,16 @@ try {
   const image = layout.message.nodeChanges.find((n) => n.fillPaints?.some((p) => p.type === "IMAGE") && n.name === "Company logo");
   check("image is named after its alt text", Boolean(image));
 
+  // Icons drawn with a CSS mask over a background colour.
+  const masks = await captureById(url + "masks.html", 600);
+  const inside = (root) => masks.message.nodeChanges.filter((n) => {
+    for (let p = parentOf(masks.message, n); p; p = parentOf(masks.message, p)) if (p === root) return true;
+    return false;
+  });
+  check("mask icon is not a solid rectangle", masks.nodes.vector && !hasSolid(masks.nodes.vector, "e0301e") && !hasSolid(masks.nodes.raster || {}, "1e7be0"));
+  check("simple SVG mask icon becomes vectors in its colour", inside(masks.nodes.vector).some((n) => n.type !== "FRAME" && hasSolid(n, "e0301e")), inside(masks.nodes.vector).map((n) => n.type).join(","));
+  check("other mask icon becomes an image", [masks.nodes.raster, ...inside(masks.nodes.raster)].some((n) => n?.fillPaints?.some((p) => p.type === "IMAGE")));
+
   // As in a background tab: requestAnimationFrame never fires. The canvas snapshot waited
   // for it forever.
   const hidden = await withTimeout(capturePage({ url: url + "hidden.html", width: 800 }), 45000).catch((error) => ({ error }));

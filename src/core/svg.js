@@ -21,7 +21,7 @@ export const fileName = (url) => {
 };
 
 // Why an SVG can't be inlined as vectors (null = simple enough).
-function complexity(svgRoot) {
+export function complexity(svgRoot) {
   for (const el of [svgRoot, ...svgRoot.querySelectorAll("*")]) {
     const tag = el.localName;
     if (!SIMPLE_TAGS.has(tag)) return tag;
@@ -32,7 +32,7 @@ function complexity(svgRoot) {
   return null;
 }
 
-async function fetchSvgText(url, net) {
+export async function fetchSvgText(url, net) {
   if (url.startsWith("data:")) return await (await fetch(url)).text();
   return await net.text(url);
 }

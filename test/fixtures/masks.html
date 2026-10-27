@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F mask icons</title>
+<style>
+  body { margin: 20px; }
+  .icon { display: block; margin: 0 0 10px; width: 28px; height: 28px; background-color: #e0301e;
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28' fill='none'%3E%3Cpath d='M4 4h20v20H4z' fill='black'/%3E%3C/svg%3E");
+    mask-repeat: no-repeat; mask-position: center; mask-size: contain; }
+  /* Not centred: drawn as a picture. */
+  #raster { mask-size: 16px 16px; mask-position: 0 0; background-color: #1e7be0; }
+</style>
+</head>
+<body>
+<figure class="icon" id="vector"></figure>
+<figure class="icon" id="raster"></figure>
+</body>
+</html>

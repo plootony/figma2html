@@ -15,6 +15,7 @@ import { createFontLoader, charsetOf, resolveStack, parseFontFaces, firstFamily,
 import { addBackgroundImages, hasUrlBackground } from "./backgrounds.js";
 import { prepareSvgImages, resolveSvgUses, rasterizeSvg, isSvgUrl, fileName } from "./svg.js";
 import { snapshotMediaElements, applySnapshots } from "./snapshots.js";
+import { prepareMaskIcons } from "./masks.js";
 import { ICON_FONT, rasterizeIconFonts, applyIconFonts } from "./icons.js";
 import { zipSync, strToU8 } from "fflate";
 import { decodePayload, sanitize, fixBlankGlyphs, fixFigmaStyleNames, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile, mergeMessages } from "./post.js";
@@ -1087,6 +1088,7 @@ export async function capture(options, env) {
       for (const [url, original] of svgs.originals) if (!svgOriginals.has(url)) svgOriginals.set(url, original);
       cancel();
     }
+    const maskIcons = await prepareMaskIcons(journal, net, roots);
 
     progress("Шрифты…");
     let text = "";
@@ -1322,6 +1324,7 @@ export async function capture(options, env) {
     fixes.pseudo = pseudo;
     fixes.whitespace = whitespace;
     fixes.flexText = flexText;
+    fixes.maskIcons = maskIcons;
     fixes.svgInlined = svgInlined;
     fixes.svgUses = svgUses;
 

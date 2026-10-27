@@ -41,7 +41,7 @@ const hasUrl = (bg) => /url\(/.test(bg || "");
 export const hasUrlBackground = (el) => hasUrl(getComputedStyle(el).backgroundImage);
 
 // "calc(100% - 40px)", "50%", "12px" → value along an axis of free space `free`.
-function resolvePosition(v, free) {
+export function resolvePosition(v, free) {
   v = v.trim();
   const calc = v.match(/^calc\((.*)\)$/);
   const expr = calc ? calc[1] : v;
@@ -53,7 +53,7 @@ function resolvePosition(v, free) {
   return total;
 }
 
-function tileSize(sizeValue, box, natural) {
+export function tileSize(sizeValue, box, natural) {
   const ratio = natural.w / natural.h;
   if (sizeValue === "cover" || sizeValue === "contain") {
     const s = (sizeValue === "cover" ? Math.max : Math.min)(box.w / natural.w, box.h / natural.h);
