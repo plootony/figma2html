@@ -21,6 +21,91 @@ import { decodePayload, sanitize, fixBlankGlyphs, fixTextLayout, fixAutoLayoutSi
 
 // Elements that never paint themselves (the converter tried to turn <source> into a frame and failed).
 const NON_RENDERED = new Set(["source", "track", "param", "area", "map", "datalist", "option", "optgroup", "base", "wbr"]);
+
+// A fixed element outside the viewport is not visible (e.g. a page-transition overlay
+// translated below the screen). The converter would still turn it into a full-screen frame,
+// which can end up covering the captured page in Figma.
+const isOffscreenFixed = (el) => {
+  if (el.getAttribute?.("data-s2f-keep") !== null) return false;
+  if (getComputedStyle(el).position !== "fixed") return false;
+  const r = el.getBoundingClientRect();
+  return r.width < 1 || r.height < 1 || r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth;
+};
+
+// Some sites change body background independently of the section (a dark process
+// section on a light page, for example). The converter only sees the colour at the
+// moment of conversion, so a section that relies on that background can end up with
+// white text on white in Figma. Sample the body background at each top-level section
+// while scrolling and bake it into the frames of the sections where it differs.
+// `scrolledColors`: body colours seen by autoScroll (null when the page wasn't scrolled here).
+async function sampleSectionBackgrounds(roots, cancel, scrolledColors) {
+  const backgrounds = new Map();
+  // One body colour through the whole scroll (most pages): nothing to bake, no second pass.
+  if (scrolledColors && scrolledColors.size <= 1) return backgrounds;
+  const sections = [...new Set(roots.flatMap((root) => [...(root.matches?.("section") ? [root] : []), ...root.querySelectorAll("section")]))].slice(0, 40);
+  const topLevel = sections.filter((el) => !sections.some((other) => other !== el && other.contains(el)));
+  if (!topLevel.length) return backgrounds;
+  // The body background can have a transition or a JS tween: wait until two samples agree.
+  const settledBodyColor = async () => {
+    let previous = "";
+    for (let i = 0; i < 12; i++) {
+      await wait(100);
+      const current = getComputedStyle(document.body).backgroundColor;
+      if (current === previous) break;
+      previous = current;
+    }
+    return previous;
+  };
+  const sampled = new Map();
+  const start = window.scrollY;
+  let base;
+  try {
+    for (const el of topLevel) {
+      cancel();
+      const rect = el.getBoundingClientRect();
+      window.scrollTo(0, Math.max(0, window.scrollY + rect.top - 10));
+      sampled.set(el, await settledBodyColor());
+    }
+  } finally {
+    window.scrollTo(0, start);
+    // What the converter will see: the body at the scroll position of the capture.
+    base = await settledBodyColor();
+  }
+  // Where the body looked the same, the page frame already has that colour; a solid fill
+  // there would only cover a body background image or a fixed canvas behind the section.
+  for (const [el, css] of sampled) {
+    if (css === base) continue;
+    const color = parseCssColor(css);
+    if (color && color.a > 0) backgrounds.set(el, color);
+  }
+  return backgrounds;
+}
+
+const parseCssColor = (css) => {
+  const m = /^rgba?\(([^)]+)\)$/i.exec((css || "").trim());
+  if (!m) return null;
+  const [r, g, b, a = 1] = m[1].split(/[,/ ]+/).filter(Boolean).map(Number);
+  if ([r, g, b, a].some((n) => !Number.isFinite(n))) return null;
+  return { r: r / 255, g: g / 255, b: b / 255, a };
+};
+
+function applySectionBackgrounds(message, trace, backgrounds, resolveElement) {
+  if (!backgrounds.size) return 0;
+  const byId = new Map(message.nodeChanges.map((n) => [`${n.guid.sessionID}:${n.guid.localID}`, n]));
+  let applied = 0;
+  for (const entry of trace.entries) {
+    if (entry.kind !== "frame") continue;
+    const el = resolveElement(entry.domPath);
+    const color = el && backgrounds.get(el);
+    const node = color && byId.get(`${entry.guid.sessionID}:${entry.guid.localID}`);
+    if (!node || node.type !== "FRAME" || !node.size) continue;
+    const hasVisibleFill = (node.fillPaints || []).some((p) => p.visible !== false && (p.type !== "SOLID" || (p.color?.a ?? 1) * (p.opacity ?? 1) > 0.01));
+    if (hasVisibleFill) continue;
+    node.fillPaints = [{ type: "SOLID", color, opacity: 1, visible: true, blendMode: "NORMAL" }];
+    applied++;
+  }
+  return applied;
+}
 const TEXT_CHAR = /[\p{L}\p{N}]/u;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -71,9 +156,6 @@ const ownText = (el) => [...el.childNodes].filter((n) => n.nodeType === 3).map((
 const isTextElement = (el) =>
   TEXT_CHAR.test(ownText(el)) || ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && el.placeholder);
 
-// The captured root: <body> for a whole page, or the chosen block. Subtree helpers use it so
-// a block capture leaves the rest of the page (and its expensive media) alone.
-const subtree = (root) => [root, ...root.querySelectorAll("*")];
 const describe = (el) => {
   const tag = el.tagName.toLowerCase();
   const id = el.id ? `#${el.id}` : "";
@@ -82,17 +164,21 @@ const describe = (el) => {
 };
 
 // Scroll through the page so lazy-loaded images and sections render. Capped in time so a
-// very long page can't stall the capture forever.
+// very long page can't stall the capture forever. Returns the body background colours seen
+// on the way (see sampleSectionBackgrounds).
 async function autoScroll(shouldCancel) {
   const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
   const stopAt = Date.now() + 30000;
+  const bodyColors = new Set();
   for (let y = 0; y < document.documentElement.scrollHeight && y < 60000 && Date.now() < stopAt; y += step) {
     shouldCancel?.();
     window.scrollTo(0, y);
     await wait(120);
+    bodyColors.add(getComputedStyle(document.body).backgroundColor);
   }
   window.scrollTo(0, 0);
   await wait(300);
+  return bodyColors;
 }
 
 // ::before / ::after are invisible to the converter (it walks real DOM nodes). Each rendered
@@ -118,6 +204,25 @@ function pseudoContent(value, host) {
   return { text };
 }
 
+// A pseudo-element with no text, image, background, border or shadow (clearfix ::after,
+// spacers) has nothing to convert. Materialised, it would still be a real child of its host
+// and change :first-child / :last-child / :nth-child / :empty matches — and with them the
+// layout (the last menu item lost its `:last-child { margin: 0 }` and wrapped to a new line).
+const isTransparent = (css) => {
+  const color = parseCssColor(css);
+  return color ? color.a === 0 : css === "transparent";
+};
+const paintsNothing = (cs, content) =>
+  !content.image &&
+  !content.text?.trim() &&
+  cs.backgroundImage === "none" &&
+  isTransparent(cs.backgroundColor) &&
+  ["Top", "Right", "Bottom", "Left"].every((side) => cs[`border${side}Style`] === "none" || !(parseFloat(cs[`border${side}Width`]) > 0)) &&
+  cs.borderImageSource === "none" &&
+  (cs.outlineStyle === "none" || !(parseFloat(cs.outlineWidth) > 0)) &&
+  cs.boxShadow === "none" &&
+  (cs.backdropFilter || "none") === "none";
+
 export function materializePseudoElements(journal, root = document.body) {
   const hideRule = document.createElement("style");
   hideRule.textContent =
@@ -129,7 +234,7 @@ export function materializePseudoElements(journal, root = document.body) {
       const cs = getComputedStyle(host, "::" + which);
       if (cs.display === "none") continue;
       const content = pseudoContent(cs.content, host);
-      if (!content) continue;
+      if (!content || paintsNothing(cs, content)) continue;
       const el = document.createElement(content.image ? "img" : "s2f-pseudo");
       if (content.image) el.src = content.image;
       else if (content.text) el.textContent = content.text;
@@ -553,7 +658,6 @@ async function createInfoImage({ title, sections }) {
   return { dataUrl, width: WIDTH, height };
 }
 
-
 const fmtPx = (n) => `${Math.round(n * 10) / 10}px`;
 const hexColor = (css) => {
   const m = /^rgba?\(([^)]+)\)$/i.exec((css || "").trim());
@@ -730,7 +834,6 @@ async function createTokensImage({ url, tokens }) {
   return { dataUrl, width: WIDTH, height };
 }
 
-
 export async function capture(options, env) {
   // keepModified: leave the prepared DOM in place (verify.mjs inspects it); call the
   // returned `restore()` afterwards.
@@ -775,11 +878,13 @@ export async function capture(options, env) {
       document.head.appendChild(style);
       journal.add(style);
     }
+    let scrolledColors = null;
     if (scroll) {
       progress("Прокрутка страницы…");
-      await autoScroll(cancel);
+      scrolledColors = await autoScroll(cancel);
     }
     cancel();
+    const bodyBackgrounds = await sampleSectionBackgrounds(roots, cancel, scrolledColors);
     await Promise.race([document.fonts.ready, wait(5000)]);
 
     for (const sel of hideSelectors.split(",").map((s) => s.trim()).filter(Boolean)) {
@@ -885,6 +990,7 @@ export async function capture(options, env) {
       image.src = info.dataUrl;
       image.width = info.width;
       image.height = info.height;
+      image.dataset.s2fKeep = "";
       Object.assign(image.style, { position: "fixed", left: "-20000px", top: "0", width: `${info.width}px`, height: `${info.height}px` });
       document.documentElement.appendChild(image);
       journal.add(image);
@@ -896,6 +1002,7 @@ export async function capture(options, env) {
       image.src = tokens.dataUrl;
       image.width = tokens.width;
       image.height = tokens.height;
+      image.dataset.s2fKeep = "";
       Object.assign(image.style, { position: "fixed", left: "-20000px", top: "0", width: `${tokens.width}px`, height: `${tokens.height}px` });
       document.documentElement.appendChild(image);
       journal.add(image);
@@ -933,7 +1040,7 @@ export async function capture(options, env) {
       trace: true,
       // A text-only element with a background image must stay a frame, or the image is lost.
       classify: (el, kind) =>
-        NON_RENDERED.has(el.tagName.toLowerCase()) ? "skip" : kind === "text" && hasUrlBackground(el) ? "frame" : kind,
+        NON_RENDERED.has(el.tagName.toLowerCase()) || isOffscreenFixed(el) ? "skip" : kind === "text" && hasUrlBackground(el) ? "frame" : kind,
       fontLoader: async (req) => {
         cancel();
         const r = await fonts.load(req, chars, pageFaces);
@@ -1009,6 +1116,7 @@ export async function capture(options, env) {
         glyphs: fixBlankGlyphs(message),
         lineBoxes: alignTextBoxesToLineBox(message, result.trace, rootTop),
         backgrounds: await addBackgroundImages(message, result.trace, net, resolveTraceElement),
+        sectionBackgrounds: applySectionBackgrounds(message, result.trace, bodyBackgrounds, resolveTraceElement),
         snapshots: applySnapshots(message, result.trace, snapshots, resolveTraceElement),
         svgNamed: nameSvgImages(message, result.trace, svgOriginals),
         hugWithFill: fixAutoLayoutSizing(message),

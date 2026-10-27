@@ -4,7 +4,7 @@
 import { sha1 } from "./bytes.js";
 import { firstFamily } from "./fonts.js";
 
-export const ICON_FONT = /icon|awesome|lucide|material|symbol|glyph|feather|remix|ionic|dashicons|slick|social|^fa[-\s]/i;
+export const ICON_FONT = /icon|awesome|lucide|material|symbol|glyph|feather|remix|ionic|dashicons|slick|social|icomoon|fontello|themify|typicons|entypo|^fa[-\s]/i;
 const IDENTITY = { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
 const ownText = (el) => [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
 

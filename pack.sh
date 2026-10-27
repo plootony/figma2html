@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the extension and packs it with the install guide into ~/Рабочий стол/site2figma-<version>.zip
+# Builds the extension and packs it with the install guide next to the project directory.
 # for handing over to testers (load unpacked in chrome://extensions).
 set -e
 cd "$(dirname "$(readlink -f "$0")")"

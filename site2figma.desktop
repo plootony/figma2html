@@ -2,7 +2,7 @@
 Type=Application
 Name=Site to Figma
 Comment=Захват сайта по адресу и вставка в Figma
-Exec="/home/boo/Рабочий стол/site2figma/start.sh"
+Exec="/home/boo/Рабочий стол/Projects/site2figma/start.sh"
 Icon=web-browser
 Terminal=false
-Categories=Graphics;Development;
+Categories=Graphics;

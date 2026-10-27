@@ -47,10 +47,12 @@ async function emulateWidth(tabId, width, height) {
   try {
     await chrome.tabs.setZoom(tabId, 1);
   } catch {}
+  let attached = false;
   try {
     if (!debuggerTabs.has(tabId)) {
       await chrome.debugger.attach({ tabId }, "1.3");
       debuggerTabs.add(tabId);
+      attached = true;
     }
     await chrome.debugger.sendCommand({ tabId }, "Emulation.setDeviceMetricsOverride", {
       width: Math.round(width),
@@ -63,6 +65,10 @@ async function emulateWidth(tabId, width, height) {
     return { ok: true };
   } catch (e) {
     await restoreZoom(tabId);
+    if (attached) {
+      debuggerTabs.delete(tabId);
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+    }
     throw e;
   }
 }
@@ -166,6 +172,14 @@ async function download(url, path) {
   return { id };
 }
 
+// captureVisibleTab shoots whichever tab is active in the window. If the user switched to
+// another tab mid-capture, that tab would end up in the layout: refuse instead.
+async function shot(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.active) throw new Error("вкладка неактивна");
+  return { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }) };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "download") {
     download(msg.url, msg.path)
@@ -178,9 +192,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "shot") {
-    chrome.tabs
-      .captureVisibleTab(sender.tab.windowId, { format: "png" })
-      .then((dataUrl) => sendResponse({ dataUrl }))
+    shot(sender.tab.id)
+      .then(sendResponse)
       .catch((e) => sendResponse({ error: String(e.message || e) }));
     return true;
   }

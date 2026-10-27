@@ -27,7 +27,7 @@ function findChrome() {
 }
 
 let browserPromise = null;
-function getBrowser() {
+export function getBrowser() {
   if (!browserPromise) {
     browserPromise = puppeteer
       .launch({
@@ -113,7 +113,6 @@ export async function capturePage({ url, width, layout = "auto", hideSelectors =
     await page.exposeFunction("__s2fNet", (u, kind) => netFetch(u, kind, url));
     // Viewport screenshot for canvas/video snapshots (src/core/snapshots.js).
     await page.exposeFunction("__s2fShot", async () => Buffer.from(await page.screenshot({ type: "png" })).toString("base64"));
-    page.on("pageerror", () => {});
     page.on("console", (m) => m.text().startsWith("[s2f]") && console.log(m.text()));
 
     // Wait for "load", then for the network to calm down. Analytics and chat widgets

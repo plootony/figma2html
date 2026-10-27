@@ -5,7 +5,18 @@
 // env.captureViewport() → Promise<ImageBitmap> of the visible viewport.
 import { sha1 } from "./bytes.js";
 
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+// Two animation frames, or 100 ms: in a background tab requestAnimationFrame never fires,
+// and waiting for it hung the capture.
+export const nextFrame = () =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, 100);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        resolve();
+      })
+    );
+  });
 
 // While shooting, everything except the target is hidden, so text and buttons drawn over a
 // background canvas don't end up baked into the picture.

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F pseudo-elements</title>
+<style>
+  body { margin: 0; font: 16px/20px Georgia, serif; }
+  /* Clearfix: an ::after that paints nothing. As a real child it would take :last-child
+     from the last item, which would get a margin and wrap to the next line. */
+  ul.menu { list-style: none; margin: 0; padding: 0; width: 400px; background: #eee; }
+  ul.menu::after { content: ""; display: table; clear: both; }
+  ul.menu li { float: left; width: 100px; margin-right: 50px; }
+  ul.menu li:last-child { margin-right: 0; }
+</style>
+</head>
+<body>
+<ul class="menu"><li>One</li><li>Two</li><li>Three</li></ul>
+</body>
+</html>

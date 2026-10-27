@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F background tab</title>
+<style>body { margin: 0; font: 16px Georgia, serif; }</style>
+</head>
+<body>
+<p>Canvas below</p>
+<canvas id="c" width="300" height="150"></canvas>
+<script>
+  const ctx = document.getElementById("c").getContext("2d");
+  ctx.fillStyle = "#e01010";
+  ctx.fillRect(0, 0, 300, 150);
+  // As in a background tab: animation frames never come.
+  window.requestAnimationFrame = () => 0;
+</script>
+</body>
+</html>

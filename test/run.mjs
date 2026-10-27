@@ -4,9 +4,10 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { decodeFigmaData } from "@figit/fig-kiwi";
 import { unzipSync, strFromU8 } from "fflate";
-import { capturePage, closeBrowser } from "../capture.mjs";
+import { capturePage, closeBrowser, getBrowser } from "../capture.mjs";
 import { mergeMessages, toClipboardHtml } from "../src/core/post.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -16,7 +17,7 @@ const check = (name, ok, detail = "") => {
   if (!ok) failures.push(name);
 };
 
-const server = http.createServer((req, res) => {
+const serveFixture = (req, res) => {
   const file = path.join(ROOT, "fixtures", new URL(req.url, "http://x").pathname === "/" ? "page.html" : new URL(req.url, "http://x").pathname);
   if (!fs.existsSync(file)) {
     res.writeHead(404);
@@ -25,9 +26,14 @@ const server = http.createServer((req, res) => {
   }
   res.setHeader("content-type", "text/html; charset=utf-8");
   res.end(fs.readFileSync(file));
-});
+};
+const server = http.createServer(serveFixture);
+// The same fixtures on a second origin, for the per-site panel settings.
+const otherServer = http.createServer(serveFixture);
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
+await new Promise((r) => otherServer.listen(0, "127.0.0.1", r));
 const url = `http://127.0.0.1:${server.address().port}/`;
+const otherUrl = `http://127.0.0.1:${otherServer.address().port}/`;
 
 const decode = (html) => decodeFigmaData(Buffer.from(html.match(/\(figma\)([^(]*)\(\/figma\)/)[1], "base64")).message;
 const textOf = (message) => message.nodeChanges.filter((n) => n.type === "TEXT").map((n) => n.textData?.characters || "").join("\n");
@@ -46,6 +52,88 @@ const figInfo = (fig) => {
     hasImagesDir: Boolean(zip["images/"]),
   };
 };
+const hasSolid = (node, hex) =>
+  (node.fillPaints || []).some((p) => p.type === "SOLID" && p.visible !== false && [p.color.r, p.color.g, p.color.b].map((c) => Math.round(c * 255).toString(16).padStart(2, "0")).join("") === hex);
+// Position of a layer on the canvas: its transform plus those of its parents.
+const absolute = (message, node) => {
+  const byId = new Map(message.nodeChanges.map((n) => [`${n.guid.sessionID}:${n.guid.localID}`, n]));
+  const pos = { x: 0, y: 0 };
+  for (let n = node; n && n.type !== "CANVAS"; n = n.parentIndex && byId.get(`${n.parentIndex.guid.sessionID}:${n.parentIndex.guid.localID}`)) {
+    pos.x += n.transform?.m02 || 0;
+    pos.y += n.transform?.m12 || 0;
+  }
+  return pos;
+};
+const withTimeout = (promise, ms) => {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`no result in ${ms} ms`)), ms)))]).finally(() => clearTimeout(timer));
+};
+
+// The extension panel (extension/content.js) in a plain page with chrome.* stubbed.
+// `storage` is the initial chrome.storage.local; the page keeps it in window.__s2fStore.
+const PANEL = fs.readFileSync(path.join(ROOT, "../extension/content.js"), "utf8");
+async function openPanel(pageUrl, storage = {}) {
+  const page = await (await getBrowser()).newPage();
+  await page.setViewport({ width: 1200, height: 800 });
+  await page.evaluateOnNewDocument((initial) => {
+    const store = (window.__s2fStore = initial);
+    const pick = (keys) => Object.fromEntries([].concat(keys ?? Object.keys(store)).filter((k) => k in store).map((k) => [k, structuredClone(store[k])]));
+    const stub = {
+      runtime: { id: "test", getURL: (p) => p, sendMessage: (msg, cb) => setTimeout(() => cb?.({}), 0), onMessage: { addListener() {} } },
+      storage: { local: { get: async (keys) => pick(keys), set: async (items) => void Object.assign(store, structuredClone(items)) } },
+    };
+    Object.defineProperty(window, "chrome", { value: stub, configurable: true, writable: true });
+  }, storage);
+  await page.goto(pageUrl, { waitUntil: "load" });
+  await page.addScriptTag({ content: PANEL });
+  await page.waitForFunction(() => document.getElementById("site2figma-panel")?.shadowRoot);
+  await new Promise((r) => setTimeout(r, 300)); // saved settings are restored asynchronously
+  return page;
+}
+// Runs fn(shadowRoot, ...args) in the page.
+const inPanel = async (page, fn, ...args) => {
+  const root = await page.evaluateHandle(() => document.getElementById("site2figma-panel").shadowRoot);
+  try {
+    return await root.evaluate(fn, ...args);
+  } finally {
+    await root.dispose();
+  }
+};
+async function pickBlock(page, selector) {
+  await inPanel(page, (root) => root.querySelector(".pick").click());
+  await page.waitForSelector("#site2figma-picker");
+  const p = await page.evaluate((sel) => {
+    const r = document.querySelector(sel).getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, selector);
+  await page.mouse.move(p.x, p.y);
+  await page.mouse.click(p.x, p.y);
+  await page.waitForFunction(() => !document.getElementById("site2figma-picker"));
+  await new Promise((r) => setTimeout(r, 400)); // settings are saved with a debounce
+}
+
+// extension/background.js with chrome.* stubbed; `shot()` sends it the "shot" message.
+function loadBackground(tab) {
+  let onMessage;
+  const shots = [];
+  const listener = { addListener() {} };
+  const chrome = {
+    debugger: { onDetach: listener },
+    action: { onClicked: listener },
+    commands: { onCommand: listener },
+    runtime: { onMessage: { addListener: (fn) => (onMessage = fn) } },
+    tabs: {
+      get: async (id) => ({ ...tab, id }),
+      captureVisibleTab: async (windowId) => {
+        shots.push(windowId);
+        return "data:image/png;base64,";
+      },
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(ROOT, "../extension/background.js"), "utf8"), { chrome, console, setTimeout, clearTimeout });
+  const shot = () => new Promise((resolve) => onMessage({ type: "shot" }, { tab: { id: 5, windowId: tab.windowId } }, resolve));
+  return { shot, shots };
+}
 
 try {
   const whole = await capturePage({ url, width: 1200 });
@@ -60,6 +148,68 @@ try {
   check("images/ directory is present", info.hasImagesDir);
   check("css background layer added", whole.debug.fixes.backgrounds >= 1);
   check("pseudo-element text materialized", textOf(wholeMsg).includes("Before"));
+  const overlayColor = wholeMsg.nodeChanges.some((n) =>
+    (n.fillPaints || []).some((p) => p.type === "SOLID" && Math.round(p.color.r * 255) === 0x12 && Math.round(p.color.g * 255) === 0x34 && Math.round(p.color.b * 255) === 0x56)
+  );
+  check("offscreen fixed overlays are skipped", !overlayColor);
+  check("constant body background is not baked into sections", whole.debug.fixes.sectionBackgrounds === 0, `sectionBackgrounds ${whole.debug.fixes.sectionBackgrounds}`);
+
+  const sections = await capturePage({ url: url + "sections.html", width: 1000 });
+  const sectionsMsg = decode(sections.clipboardHtml);
+  check(
+    "changed body background is baked into its section only",
+    sections.debug.fixes.sectionBackgrounds === 1 && sectionsMsg.nodeChanges.some((n) => n.type === "FRAME" && hasSolid(n, "102030")),
+    `sectionBackgrounds ${sections.debug.fixes.sectionBackgrounds}`
+  );
+
+  // A clearfix ::after must not become a real child: the last item would lose :last-child,
+  // get its margin back and wrap to a second line.
+  const pseudo = await capturePage({ url: url + "pseudo.html", width: 800 });
+  const pseudoMsg = decode(pseudo.clipboardHtml);
+  const itemPos = (text) => {
+    const n = pseudoMsg.nodeChanges.find((node) => node.type === "TEXT" && node.textData?.characters === text);
+    return n && absolute(pseudoMsg, n);
+  };
+  const [one, three] = [itemPos("One"), itemPos("Three")];
+  check("clearfix ::after keeps the menu on one line", one && three && Math.abs(one.y - three.y) < 1 && three.x > 250, JSON.stringify({ one, three }));
+  check("pseudo-elements that paint nothing are not materialized", pseudo.debug.fixes.pseudo === 0, `pseudo ${pseudo.debug.fixes.pseudo}`);
+
+  // As in a background tab: requestAnimationFrame never fires. The canvas snapshot waited
+  // for it forever.
+  const hidden = await withTimeout(capturePage({ url: url + "hidden.html", width: 800 }), 45000).catch((error) => ({ error }));
+  check("capture finishes without animation frames", !hidden.error, String(hidden.error?.message));
+  check("canvas is snapshotted without animation frames", hidden.debug?.fixes.snapshots >= 1, JSON.stringify(hidden.debug?.fixes));
+
+  const inactive = loadBackground({ windowId: 3, active: false });
+  const refused = await inactive.shot();
+  check("screenshot is refused when the tab is not active", Boolean(refused?.error) && !inactive.shots.length, JSON.stringify(refused));
+  const active = loadBackground({ windowId: 3, active: true });
+  const taken = await active.shot();
+  check("screenshot is taken when the tab is active", Boolean(taken?.dataUrl) && active.shots[0] === 3, JSON.stringify(taken));
+
+  // Panel settings. A block inside an element with an id is saved as a selector (CSS.escape
+  // used to be shadowed by the panel's styles, and the selector came out empty).
+  const siteKey = (u) => `s2fSite:${new URL(u).origin}`;
+  const pageA = await openPanel(url + "panel.html");
+  await inPanel(pageA, (root) => root.querySelector(".abs").click());
+  await inPanel(pageA, (root) => (root.querySelector("details.advanced").open = true)); // scans the breakpoints
+  await pickBlock(pageA, ".hero");
+  const stored = await pageA.evaluate(() => window.__s2fStore);
+  const savedTargets = stored[siteKey(url)]?.targets || [];
+  const savedResolves = savedTargets.length === 1 && (await pageA.evaluate((sel) => document.querySelector(sel) === document.querySelector(".hero"), savedTargets[0]));
+  check("chosen block inside an element with id is saved", savedResolves, JSON.stringify(stored));
+  await pageA.close();
+
+  const again = await openPanel(url + "panel.html", stored);
+  check("chosen block is restored on the same page", (await inPanel(again, (root) => root.querySelector(".go").textContent)) === "Захватить выбранные блоки");
+  check("breakpoints of the site are restored", (await inPanel(again, (root) => root.querySelector(".widthlist").textContent)).includes("700"));
+  await again.close();
+
+  const otherSite = await openPanel(otherUrl + "panel.html", stored);
+  check("chosen block is not restored on another site", (await inPanel(otherSite, (root) => root.querySelector(".go").textContent)) === "Захватить всю страницу");
+  check("breakpoints of another site are not shown", !(await inPanel(otherSite, (root) => root.querySelector(".widthlist").textContent)).includes("700"));
+  check("general options are shared between sites", await inPanel(otherSite, (root) => root.querySelector(".abs").checked));
+  await otherSite.close();
 
   const block = await capturePage({ url, width: 1200, targetSelector: "#hero" });
   const blockMsg = decode(block.clipboardHtml);
@@ -103,6 +253,7 @@ try {
 } finally {
   await closeBrowser();
   server.close();
+  otherServer.close();
 }
 
 console.log(failures.length ? `\n${failures.length} test(s) failed` : "\nAll tests passed");

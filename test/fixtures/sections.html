@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F body background per section</title>
+<style>
+  body { margin: 0; font: 18px/1.4 Georgia, serif; background: #f4f4f4; color: #111; }
+  section { height: 900px; padding: 40px; box-sizing: border-box; }
+  #dark { color: #fff; }
+</style>
+</head>
+<body>
+<section id="intro">Light intro</section>
+<section id="dark">Dark process</section>
+<section id="outro">Light outro</section>
+<script>
+  // The body turns dark while the middle section is at the top of the viewport.
+  const dark = document.getElementById("dark");
+  const update = () => {
+    const r = dark.getBoundingClientRect();
+    document.body.style.background = r.top <= 20 && r.bottom > 20 ? "#102030" : "";
+  };
+  addEventListener("scroll", update);
+  update();
+</script>
+</body>
+</html>

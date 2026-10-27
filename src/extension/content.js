@@ -7,7 +7,7 @@ import { scanFonts } from "./fontscan.js";
 import { scanBreakpoints } from "./breakpoints.js";
 import { mergeMessages, toClipboardHtml, toFigFile } from "../core/post.js";
 import { bytesToBase64 } from "../core/bytes.js";
-
+import { nextFrame } from "../core/snapshots.js";
 
 function send(msg) {
   return new Promise((resolve, reject) =>
@@ -75,9 +75,8 @@ const net = {
   },
 };
 
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-
-const CSS = `
+// Not `CSS`: that name would shadow the browser's CSS (CSS.escape in cssPath).
+const PANEL_CSS = `
 :host { all: initial; }
 .panel { position: fixed; top: 16px; right: 16px; z-index: 2147483647; width: 320px; box-sizing: border-box;
   background: #1f1f1d; color: #ececea; border: 1px solid #3a3a36; border-radius: 12px; padding: 16px;
@@ -202,7 +201,7 @@ function createPanel() {
   const host = document.createElement("div");
   host.id = "site2figma-panel";
   const root = host.attachShadow({ mode: "open" });
-  root.innerHTML = `<style>${CSS}</style>
+  root.innerHTML = `<style>${PANEL_CSS}</style>
     <div class="panel">
       <div class="head"><span class="title">Site → Figma</span><button class="close" title="Закрыть">×</button></div>
       <div class="tabs"><button class="active" data-tab="figma">В Figma</button><button data-tab="media">Медиа</button><button data-tab="fonts">Шрифты</button></div>
@@ -307,7 +306,10 @@ function createPanel() {
   let widthScanning = false;
   let cancelRequested = false;
   let toastTimer = 0;
+  // Options are shared by all sites. Breakpoints and "remove before capture" selectors belong
+  // to one site, the chosen blocks to one page: restored elsewhere, they matched other elements.
   const SETTINGS_KEY = "s2fSettings";
+  const SITE_KEY = `s2fSite:${location.origin !== "null" ? location.origin : location.href.split(/[?#]/)[0]}`;
   let saveTimer = 0;
 
   const saveSettings = () => {
@@ -317,16 +319,19 @@ function createPanel() {
       chrome.storage?.local?.set({
         [SETTINGS_KEY]: {
           abs: $(".abs").checked,
-          exclude: $(".exclude").checked,
           logging: $(".logging").checked,
           extraInfo: $(".extrainfo").checked,
           designTokens: $(".tokens").checked,
+          customWidth: $(".widthcustom").value,
+          tab: active,
+        },
+        [SITE_KEY]: {
+          exclude: $(".exclude").checked,
+          hide: $(".hide").value,
           widths: [...root.querySelectorAll(".widths input[data-width]:checked")].map((i) => Number(i.dataset.width)),
           detectedWidths,
-          customWidth: $(".widthcustom").value,
-          hide: $(".hide").value,
-          tab: active,
           targets: targets.map(cssPath).filter(Boolean),
+          targetsPath: location.pathname,
         },
       });
     }, 150);
@@ -560,26 +565,30 @@ function createPanel() {
   });
 
   // Restore the last options. Selected blocks are saved as CSS selectors and only come
-  // back if the same elements still exist on the page.
-  chrome.storage?.local?.get(SETTINGS_KEY).then((res) => {
+  // back on the same page, if the same elements still exist there. Site fields of the old
+  // shared settings (before they were split per site) are ignored.
+  chrome.storage?.local?.get([SETTINGS_KEY, SITE_KEY]).then((res) => {
     const saved = res?.[SETTINGS_KEY];
-    if (!saved) return;
-    $(".abs").checked = Boolean(saved.abs);
-    $(".exclude").checked = Boolean(saved.exclude);
-    $(".logging").checked = Boolean(saved.logging);
-    $(".extrainfo").checked = Boolean(saved.extraInfo);
-    $(".tokens").checked = Boolean(saved.designTokens);
-    updateLogVisibility();
-    if ($(".logging").checked) addLog("Логирование включено");
-    detectedWidths = Array.isArray(saved.detectedWidths) ? saved.detectedWidths : Array.isArray(saved.widths) ? saved.widths : [];
+    const site = res?.[SITE_KEY];
+    if (!saved && !site) return;
+    if (saved) {
+      $(".abs").checked = Boolean(saved.abs);
+      $(".logging").checked = Boolean(saved.logging);
+      $(".extrainfo").checked = Boolean(saved.extraInfo);
+      $(".tokens").checked = Boolean(saved.designTokens);
+      updateLogVisibility();
+      if ($(".logging").checked) addLog("Логирование включено");
+      $(".widthcustom").value = saved.customWidth || "";
+      if (saved.tab) selectTab(saved.tab);
+    }
+    detectedWidths = Array.isArray(site?.detectedWidths) ? site.detectedWidths : [];
     if (detectedWidths.length) widthScanTried = true;
-    renderWidths(saved.widths || []);
-    $(".widthcustom").value = saved.customWidth || "";
-    $(".hide").value = saved.hide || "";
+    renderWidths(site?.widths || []);
+    $(".exclude").checked = Boolean(site?.exclude);
+    $(".hide").value = site?.hide || "";
     updateHideBox();
-    if (saved.tab) selectTab(saved.tab);
-    if (Array.isArray(saved.targets) && saved.targets.length) {
-      const els = saved.targets
+    if (site?.targetsPath === location.pathname && Array.isArray(site.targets) && site.targets.length) {
+      const els = site.targets
         .map((sel) => {
           try {
             return document.querySelector(sel);
@@ -624,7 +633,9 @@ function createPanel() {
   });
 
   // Screenshot of the top of the page for the .fig thumbnail; the panel is hidden meanwhile.
+  // In a background tab there is nothing to shoot: the .fig gets a plain thumbnail instead.
   async function thumbnail(info) {
+    if (document.visibilityState === "hidden") return null;
     host.style.display = "none";
     await nextFrame();
     try {
@@ -648,9 +659,31 @@ function createPanel() {
     }
   }
 
+  // Screenshots show the tab that is visible in the window: while the user is on another tab,
+  // the capture waits (or stops on "Остановить") instead of shooting that tab.
+  async function whenVisible() {
+    if (document.visibilityState !== "hidden") return;
+    const previous = $(".status").textContent;
+    status("Захват на паузе: вернитесь на эту вкладку, чтобы снять canvas/видео", "warn");
+    await new Promise((resolve) => {
+      const check = () => {
+        if (document.visibilityState === "hidden" && !cancelRequested) return;
+        document.removeEventListener("visibilitychange", check);
+        clearInterval(timer);
+        resolve();
+      };
+      const timer = setInterval(check, 500);
+      document.addEventListener("visibilitychange", check);
+    });
+    stop();
+    status(previous);
+    await nextFrame();
+  }
+
   // Viewport screenshot for canvas/video snapshots. Chrome allows ~2 captures per second.
   let lastShot = 0;
   async function captureViewport() {
+    await whenVisible();
     const waitMs = lastShot + 600 - Date.now();
     if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
     lastShot = Date.now();
@@ -690,6 +723,7 @@ function createPanel() {
   // One capture per width, merged side by side into a single .fig.
   async function captureWidths(widths) {
     const results = [];
+    const capturedWidths = [];
     const parts = [];
     const logs = [];
     let totalWidth = 0;
@@ -717,6 +751,7 @@ function createPanel() {
             { net, thumbnail, captureViewport, bundledFont, progress: (m) => stageProgress(m) }
           );
           results.push(r);
+          capturedWidths.push(width);
           parts.push({ message: r.debug.message, x: totalWidth, y: 0 });
           totalWidth += r.width + gap;
           totalHeight = Math.max(totalHeight, r.height);
@@ -733,7 +768,7 @@ function createPanel() {
       totalHeight = Math.max(1, totalHeight);
       const first = results[0];
       const message = mergeMessages(parts);
-      const name = `${document.title || location.hostname} — ${results.map((r) => r.width).join(" / ")}px`;
+      const name = `${document.title || location.hostname} — ${capturedWidths.join(" / ")}px`;
       const shot = (await thumbnail({ width: totalWidth, height: totalHeight }).catch(() => null)) || (await blankThumbnail(totalWidth, totalHeight));
       return {
         ...first,
