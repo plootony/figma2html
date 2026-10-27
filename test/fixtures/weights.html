@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F font weights and glyphs</title>
+<style>
+  /* The page's own Inter, without 400 and 600: the browser draws 400 with 500 and 600 with
+     700 (CSS font matching), not with the numerically nearest file. */
+  @font-face { font-family: "Inter"; font-weight: 300; src: url(/fonts/Inter-300.ttf); }
+  @font-face { font-family: "Inter"; font-weight: 500; src: url(/fonts/Inter-500.ttf); }
+  @font-face { font-family: "Inter"; font-weight: 700; src: url(/fonts/Inter-700.ttf); }
+  /* A "Lato" that has Cyrillic on the site, while Figma's Lato doesn't. */
+  @font-face { font-family: "Lato"; src: url(/fonts/Inter-400.ttf); }
+  body { margin: 20px; font-size: 18px; }
+  p { margin: 0 0 8px; }
+</style>
+</head>
+<body>
+<p style="font-family: Inter; font-weight: 400">Weight400 text</p>
+<p style="font-family: Inter; font-weight: 600">Weight600 text</p>
+<p style="font-family: Lato">SiteLato Привет</p>
+</body>
+</html>

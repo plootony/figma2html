@@ -17,14 +17,18 @@ const check = (name, ok, detail = "") => {
   if (!ok) failures.push(name);
 };
 
+// Fixtures, and /fonts/* from the extension's bundled Inter (fonts the test pages ship themselves).
 const serveFixture = (req, res) => {
-  const file = path.join(ROOT, "fixtures", new URL(req.url, "http://x").pathname === "/" ? "page.html" : new URL(req.url, "http://x").pathname);
+  const pathname = new URL(req.url, "http://x").pathname;
+  const file = pathname.startsWith("/fonts/")
+    ? path.join(ROOT, "../extension", pathname)
+    : path.join(ROOT, "fixtures", pathname === "/" ? "page.html" : pathname);
   if (!fs.existsSync(file)) {
     res.writeHead(404);
     res.end();
     return;
   }
-  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.setHeader("content-type", file.endsWith(".ttf") ? "font/ttf" : "text/html; charset=utf-8");
   res.end(fs.readFileSync(file));
 };
 const server = http.createServer(serveFixture);
@@ -205,7 +209,21 @@ try {
   const fonts = await captureById(url + "fonts.html", 900, () => ({
     helvStack: document.getElementById("helv").style.fontFamily,
     montserratLoaded: [...document.fonts].some((f) => f.family.replace(/["']/g, "") === "Montserrat" && f.status === "loaded"),
+    // Width of each paragraph's text as the page draws it, by its first word.
+    widths: Object.fromEntries(
+      [...document.querySelectorAll("p")].map((p) => {
+        const range = document.createRange();
+        range.selectNodeContents(p);
+        return [p.textContent.trim().split(" ")[0], range.getBoundingClientRect().width];
+      })
+    ),
   }));
+  // The converter lays the text out with the same font file the page draws it with.
+  const sameWidth = (start) => {
+    const layout = textNode(fonts.message, start)?.derivedTextData?.layoutSize?.x;
+    const dx = layout - fonts.page.widths[start];
+    return { ok: Math.abs(dx) < 1, detail: `layout ${layout?.toFixed(1)} vs page ${fonts.page.widths[start]?.toFixed(1)}` };
+  };
   const fontOf = (start) => {
     const n = textNode(fonts.message, start);
     return n ? `${n.fontName.family} / ${n.fontName.style}` : "no layer";
@@ -221,6 +239,25 @@ try {
   expectFont("Google family ending with a style word stays itself", "ArchivoBlack", "Archivo Black / Regular");
   check("substitute keeps the page's stack as fallback", /^"?Arimo"?, .*Arial/.test(fonts.page.helvStack), fonts.page.helvStack);
   check("substitute font is loaded into the page", fonts.page.montserratLoaded);
+  // Weights between named styles get the file the browser picks for them (CSS font matching):
+  // 450 → 500, 350 → 300 — the converter used to round 350 to 400.
+  expectFont("weight 450 gets the style the browser draws (500)", "OpenVar", "Open Sans / Medium");
+  expectFont("weight 350 gets the style the browser draws (300)", "Light350", "Open Sans / Light");
+  for (const [name, start] of [["weight 450", "OpenVar"], ["weight 350", "Light350"], ["Google font the page doesn't load", "ArchivoBlack"]]) {
+    const { ok, detail } = sameWidth(start);
+    check(`${name}: page and Figma use the same font file`, ok, detail);
+  }
+  const missingGlyphs = fonts.result.debug.missingGlyphs || [];
+  check("missing Cyrillic in the font is reported", missingGlyphs.some((m) => m.startsWith("Lato") && m.includes("П")), JSON.stringify(missingGlyphs));
+
+  // The page's own font files: the weight the browser draws with, and Cyrillic Figma lacks.
+  const weights = await captureById(url + "weights.html", 900);
+  const weightStyle = (start) => textNode(weights.message, start)?.fontName?.style;
+  check("400 without its file is drawn and named as 500", weightStyle("Weight400") === "Medium", weightStyle("Weight400"));
+  check("600 without its file is drawn and named as 700", weightStyle("Weight600") === "Bold", weightStyle("Weight600"));
+  const siteLato = (weights.result.debug.missingGlyphs || []).find((m) => m.startsWith("Lato"));
+  check("Cyrillic missing from the Figma version is reported", /в Figma нет кириллицы/.test(siteLato || ""), siteLato);
+
   const lineHeight = (start) => JSON.stringify(textNode(fonts.message, start)?.lineHeight);
   check("unitless line-height becomes relative (RAW)", lineHeight("RawLine") === JSON.stringify({ value: 1.5, units: "RAW" }), lineHeight("RawLine"));
   check("pixel line-height stays pixels", lineHeight("PixelLine") === JSON.stringify({ value: 30, units: "PIXELS" }), lineHeight("PixelLine"));

@@ -786,6 +786,7 @@ function createPanel() {
           failures: results.flatMap((r) => r.debug.failures || []),
           imageFailures: results.flatMap((r) => r.debug.imageFailures || []),
           fontFailures: results.flatMap((r) => r.debug.fontFailures || []),
+          missingGlyphs: [...new Set(results.flatMap((r) => r.debug.missingGlyphs || []))],
           fixes: results.reduce((acc, r) => {
             for (const [k, v] of Object.entries(r.debug.fixes || {})) if (typeof v === "number") acc[k] = (acc[k] || 0) + v;
             return acc;
@@ -829,9 +830,9 @@ function createPanel() {
         );
       }
       finishProgress();
-      for (const line of result.log || []) addLog(line, /Не удалось|Не загрузились/.test(line) ? "warn" : "");
+      for (const line of result.log || []) addLog(line, /Не удалось|Не загрузились|Нет символов/.test(line) ? "warn" : "");
       console.info("site2figma: capture", JSON.stringify(result.debug.fixes), "fonts", JSON.stringify(result.debug.fonts));
-      const notes = result.log.filter((line) => !/Не удалось|Не загрузились/.test(line)).join(" ");
+      const notes = result.log.filter((line) => !/Не удалось|Не загрузились|Нет символов/.test(line)).join(" ");
       const summary = `Готово за ${Math.round((Date.now() - t0) / 1000)} с: ${result.width}px, ${result.nodes} слоёв, ${result.images} картинок, ${(result.fig.length / 1048576).toFixed(1)} МБ.`;
       $(".result").classList.remove("hidden");
       renderSvgList();
@@ -933,6 +934,7 @@ function createPanel() {
       ...(d.failures || []).map((x) => ["Элемент", x]),
       ...(d.imageFailures || []).map((x) => ["Картинка", x]),
       ...(d.fontFailures || []).map((x) => ["Шрифт", x]),
+      ...(d.missingGlyphs || []).map((x) => ["Символы", x]),
     ];
     const box = $(".diag");
     box.classList.toggle("hidden", !rows.length);

@@ -143,6 +143,14 @@ const PATCHES = [
     replace: "\t\tconst actualCross = isRow ? rect.y : rect.x;\n\t\tif (spec.stackCounterAlignItems === \"BASELINE\") expectedCross = actualCross;",
   },
   {
+    // Font weights were rounded to hundreds before reaching the font loader: 350 became 400,
+    // while the browser draws 350 with the 300 file (CSS font matching). The loader gets the
+    // exact weight, matches it the browser's way and returns the named style it picked
+    // (src/core/fonts.js), so style names stay valid.
+    find: "\treturn Math.round(Math.max(100, Math.min(900, weight)) / 100) * 100;",
+    replace: "\treturn Math.max(1, Math.min(1e3, Math.round(weight)));",
+  },
+  {
     // PostScript name from the page's own font file can belong to another cut of the family
     // (FinlandicaText-Regular for CSS family "Finlandica"). Figma looks the font up by it and
     // pastes empty text layers. Google/Figma name fonts <FamilyNoSpaces>-<StyleNoSpaces>,

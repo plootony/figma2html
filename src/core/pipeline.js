@@ -11,7 +11,7 @@
 // }
 import { createFigmaConverter } from "@figit/dom-to-figma";
 import { base64ToBytes } from "./bytes.js";
-import { createFontLoader, charsetOf, resolveStack, parseFontFaces, firstFamily } from "./fonts.js";
+import { createFontLoader, charsetOf, resolveStack, parseFontFaces, firstFamily, googleFamily, missingCharacters } from "./fonts.js";
 import { addBackgroundImages, hasUrlBackground } from "./backgrounds.js";
 import { prepareSvgImages, resolveSvgUses, rasterizeSvg, isSvgUrl, fileName } from "./svg.js";
 import { snapshotMediaElements, applySnapshots } from "./snapshots.js";
@@ -299,6 +299,8 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
     const cs = getComputedStyle(el);
     return { el, stack: cs.fontFamily, weight: Number(cs.fontWeight) || 400, italic: cs.fontStyle !== "normal", text: isTextElement(el) };
   });
+  // Families the page has faces for (it may have "Montserrat" under "montserrat").
+  const pageFamilies = new Set([...document.fonts].map((f) => f.family.replace(/["']/g, "").toLowerCase()));
   const plan = new Map(); // stack -> { family, weight?, italic? }
   const mapping = new Map();
   for (const stack of new Set(items.filter((i) => i.text).map((i) => i.stack))) {
@@ -307,7 +309,9 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
     const target = await resolveStack(stack, chars, fonts);
     const to = target.family + (target.weight ? ` ${target.weight}` : "") + (target.italic ? " italic" : "");
     mapping.set(`${first}->${to}`, { from: first, to });
-    if (target.family !== first || target.weight || target.italic) plan.set(stack, target);
+    // Also a Google family the page names but never loads: the browser draws a fallback
+    // font there, while Figma has the real one — the lines broke differently.
+    if (target.family !== first || target.weight || target.italic || !pageFamilies.has(target.family.toLowerCase())) plan.set(stack, target);
   }
   if (!plan.size) return { changes: [], mapping: [...mapping.values()] };
 
@@ -334,10 +338,8 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
     needed.get(target.family).set(`${weight}|${italic}`, [weight, italic]);
   }
 
-  // Families the page doesn't have (it may already have "Montserrat" under "montserrat"):
-  // loaded from the same Google files the converter measures, as bytes — no stylesheet
-  // request that the page's CSP could block.
-  const pageFamilies = new Set([...document.fonts].map((f) => f.family.replace(/["']/g, "").toLowerCase()));
+  // Families the page doesn't have: loaded from the same Google files the converter
+  // measures, as bytes — no stylesheet request that the page's CSP could block.
   const loaded = new Set();
   await Promise.all(
     [...needed]
@@ -566,6 +568,32 @@ function relativeLineHeights(message, trace) {
     changed++;
   }
   return changed;
+}
+
+// Fonts are keyed the way the converter requests them: first family, numeric weight, italic.
+const fontKey = (family, weight, italic) => `${family} ${weight}${italic ? "i" : ""}`;
+const fontKeyOf = (el) => {
+  const cs = getComputedStyle(el);
+  return fontKey(firstFamily(cs.fontFamily), Number(cs.fontWeight) || 400, cs.fontStyle !== "normal");
+};
+
+// The text each font draws (as displayed: text-transform applied), to check it against the
+// glyphs of the font file.
+function textByFont(roots) {
+  const out = new Map();
+  for (const root of rootsOf(roots)) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const text = walker.currentNode.textContent;
+      const el = walker.currentNode.parentElement;
+      if (!el || !text.trim()) continue;
+      const transform = getComputedStyle(el).textTransform;
+      const shown = transform === "uppercase" ? text.toUpperCase() : transform === "lowercase" ? text.toLowerCase() : transform === "capitalize" ? text + text.toUpperCase() : text;
+      const key = fontKeyOf(el);
+      out.set(key, (out.get(key) || "") + shown);
+    }
+  }
+  return out;
 }
 
 const lineRects = (node) => {
@@ -1177,6 +1205,8 @@ export async function capture(options, env) {
 
     progress("Конвертация…");
     const fontSources = new Map();
+    const drawnText = textByFont(roots);
+    const glyphWarnings = [];
     const fontFailures = [];
     const imageFailures = [];
     const converter = createFigmaConverter({
@@ -1188,10 +1218,19 @@ export async function capture(options, env) {
       fontLoader: async (req) => {
         cancel();
         const r = await fonts.load(req, chars, pageFaces);
-        fontSources.set(`${req.family} ${req.weight}${req.italic ? "i" : ""}`, r.error ? "нет" : r.source);
+        const key = fontKey(req.family, req.weight, req.italic);
+        const label = `${req.family} ${req.weight}${req.italic ? " italic" : ""}`;
+        fontSources.set(key, r.error ? "нет" : r.source);
         if (r.error) {
-          fontFailures.push(`${req.family} ${req.weight}${req.italic ? " italic" : ""}: ${r.error}`);
+          fontFailures.push(`${label}: ${r.error}`);
           throw new Error(r.error);
+        }
+        const text = drawnText.get(key) || "";
+        const missing = missingCharacters(r.b64, text);
+        if (missing.length) {
+          glyphWarnings.push(`${label}: в шрифте нет символов «${missing.slice(0, 12).join("")}${missing.length > 12 ? "…" : ""}» — в Figma они будут пустыми или другим шрифтом`);
+        } else if (/[Ѐ-ӿ]/.test(text) && googleFamily(req.family)?.cyrillic === false) {
+          glyphWarnings.push(`${label}: у этого шрифта в Figma нет кириллицы — русский текст при правке сменит шрифт`);
         }
         return { bytes: base64ToBytes(r.b64).buffer, resolvedWeight: r.weight, resolvedItalic: r.italic, ...(r.family && { resolvedFamily: r.family }) };
       },
@@ -1294,6 +1333,7 @@ export async function capture(options, env) {
     }
     if (fixes.iconFonts) log.push(`Иконочные шрифты: ${fixes.iconFonts} заменены картинками`);
     if (imageFailures.length) log.push(`Не загрузились картинки: ${imageFailures.length}. Первая — ${imageFailures[0]}`);
+    if (glyphWarnings.length) log.push(`Нет символов в шрифтах: ${glyphWarnings.length}. Первое — ${glyphWarnings[0]}`);
     if (fontFailures.length) log.push(`Не загрузились шрифты: ${fontFailures.length}. Первый — ${fontFailures[0]}`);
 
     // Originals of the SVGs kept as images, for dropping into Figma by hand.
@@ -1322,6 +1362,7 @@ export async function capture(options, env) {
         failures,
         imageFailures,
         fontFailures,
+        missingGlyphs: glyphWarnings,
         seconds: (Date.now() - t0) / 1000,
         fixes,
         images,

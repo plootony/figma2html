@@ -94,7 +94,7 @@ export function createFontLoader(net, bundled) {
       // from the page's file, but the style must be one Figma can resolve, or the text
       // layers arrive empty.
       const variants = await googleVariants(family, text).catch(() => []);
-      const v = variants.length ? pickVariant(variants, weight, face.italic) : null;
+      const v = variants.length ? pickVariant(variants, face.weightMin, face.italic) : null;
       for (const url of face.urls) {
         try {
           return {
@@ -111,7 +111,7 @@ export function createFontLoader(net, bundled) {
       if (file) return { b64: file.b64, weight: file.weight, italic: file.italic, family: fam === family ? undefined : fam, source: "google" };
     }
     if (bundled) {
-      const w = [300, 400, 500, 600, 700].reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
+      const w = matchWeight([300, 400, 500, 600, 700].map((weight) => ({ weight })), weight).weight;
       const b64 = await bundled(w).catch(() => null);
       if (b64) return { b64, weight: w, italic: false, family: family === FALLBACK_FAMILY ? undefined : FALLBACK_FAMILY, source: "bundled" };
     }
@@ -123,8 +123,40 @@ export function createFontLoader(net, bundled) {
 
 function pickVariant(variants, weight, italic) {
   const sameStyle = variants.filter((v) => v.italic === italic);
-  const pool = sameStyle.length ? sameStyle : variants;
-  return pool.reduce((best, v) => (Math.abs(v.weight - weight) < Math.abs(best.weight - weight) ? v : best));
+  return matchWeight(sameStyle.length ? sameStyle : variants, weight);
+}
+
+// The face the browser draws with when the requested weight is missing (CSS Fonts 4,
+// font-weight matching): 800 with 700 and 900 present is 900, 450 with 400 and 500 is 500 —
+// not the numerically nearest, which picked another file than the page showed.
+// `range(item)` → [min, max] weights of the face (variable faces cover a range).
+export function matchWeight(items, desired, range = (item) => [item.weight, item.weight]) {
+  const rank = (w) => {
+    if (w === desired) return 0;
+    if (desired >= 400 && desired <= 500) return w > desired && w <= 500 ? w - desired : w < desired ? 1000 + desired - w : 2000 + w - desired;
+    if (desired < 400) return w < desired ? desired - w : 1000 + w - desired;
+    return w > desired ? w - desired : 1000 + desired - w;
+  };
+  let best = null;
+  let bestRank = Infinity;
+  for (const item of items) {
+    const [min, max] = range(item);
+    const r = rank(Math.min(max, Math.max(min, desired)));
+    if (r < bestRank) [best, bestRank] = [item, r];
+  }
+  return best;
+}
+
+// Characters of `text` the font file has no glyph for (spaces aside). The browser fills them
+// in from a fallback font; in Figma they come out empty or in another font.
+export function missingCharacters(b64, text) {
+  let font;
+  try {
+    font = create(base64ToBytes(b64));
+  } catch {
+    return [];
+  }
+  return [...new Set(text)].filter((c) => !/\s/.test(c) && !font.hasGlyphForCodePoint(c.codePointAt(0)));
 }
 
 // Unique characters of a page, in both cases (CSS text-transform can change them).
@@ -209,7 +241,9 @@ const SIMILAR_PREFIX = [
 
 // Google Fonts catalogue (scripts/google-fonts.mjs): exact family names, so a family the
 // page spells differently still reaches Figma under the name Figma knows.
-const GOOGLE_FAMILIES = new Map(GOOGLE_FONTS.families.map(([family]) => [familyKey(family), family]));
+const GOOGLE_FAMILIES = new Map(GOOGLE_FONTS.families.map(([family, , , flags]) => [familyKey(family), { family, cyrillic: Boolean(flags & 1) }]));
+/** Catalogue entry of a Google family: { family, cyrillic }. */
+export const googleFamily = (name) => GOOGLE_FAMILIES.get(familyKey(name)) || null;
 
 const unquote = (f) => f.trim().replace(/^["']|["']$/g, "").trim();
 export const firstFamily = (stack) => unquote(stack.split(",")[0] || "");
@@ -264,7 +298,7 @@ export async function resolveStack(stack, text, fonts) {
   const { name, readings } = parseFamilyName(fam);
   const styleOf = (r) => ({ ...(r.weight && { weight: r.weight }), ...(r.italic && { italic: true }) });
   for (const r of readings) {
-    const family = SIMILAR_BY_KEY.get(r.key) || GOOGLE_FAMILIES.get(r.key);
+    const family = SIMILAR_BY_KEY.get(r.key) || GOOGLE_FAMILIES.get(r.key)?.family;
     if (family) return { family, ...styleOf(r) };
   }
   // Prefixes from the barest reading: "HelveticaNeue-Bold" is Arimo Bold, not Arimo.
@@ -323,8 +357,7 @@ function pickPageFace(faces, { family, weight, italic }) {
   if (!own.length) return null;
   const sameStyle = own.filter((f) => f.italic === italic);
   const pool = sameStyle.length ? sameStyle : own;
-  const dist = (f) => (weight < f.weightMin ? f.weightMin - weight : weight > f.weightMax ? weight - f.weightMax : 0);
-  const best = pool.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+  const best = matchWeight(pool, weight, (f) => [f.weightMin, f.weightMax]);
   const siblings = pool.filter((f) => f.weightMin === best.weightMin && f.weightMax === best.weightMax);
   if (best.weightMin !== best.weightMax || siblings.some((f) => f.unicodeRange)) return null;
   return best;
