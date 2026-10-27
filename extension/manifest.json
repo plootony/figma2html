@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Site to Figma",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "Конвертирует открытую страницу в редактируемый дизайн Figma (файл .fig или вставка через буфер) и скачивает все медиа страницы.",
   "action": {
     "default_title": "Site to Figma — захватить страницу",
