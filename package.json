@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node server.mjs",
     "build": "node build.mjs",
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs",
+    "fonts:catalog": "node scripts/google-fonts.mjs"
   },
   "keywords": [],
   "author": "",

@@ -7,6 +7,10 @@
 // 2. Google Fonts with `text=<page chars>` — one file with exactly the characters used,
 //    including Cyrillic (default Google files are Latin-only → invisible glyphs in Figma);
 // 3. Inter, for metrics only (Figma still gets the original family name).
+import { create } from "fontkit";
+import { base64ToBytes } from "./bytes.js";
+import GOOGLE_FONTS from "./google-fonts.json";
+
 const FALLBACK_FAMILY = "Inter";
 const WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900];
 
@@ -52,6 +56,36 @@ export function createFontLoader(net, bundled) {
     return (await googleVariants(family, text).catch(() => [])).length > 0;
   }
 
+  // A file fontkit can lay the page's characters out with (the converter parses it the same way).
+  const layoutChecks = new Map(); // url -> boolean
+  const laysOut = (url, b64, text) => {
+    if (!layoutChecks.has(url)) {
+      try {
+        create(base64ToBytes(b64)).layout(text);
+        layoutChecks.set(url, true);
+      } catch {
+        layoutChecks.set(url, false);
+      }
+    }
+    return layoutChecks.get(url);
+  };
+
+  // The Google file closest to a weight/style, with its bytes (base64). The `text=` subset
+  // (only the page's characters, Cyrillic included) comes first; Google sometimes builds one
+  // fontkit can't lay out (Manrope's TTF subset fails on the space), and the converter then
+  // lost the text — the full file is used instead. Substitute fonts are loaded into the page
+  // from these files too, so the page and the converter measure the same font.
+  async function googleFace(family, weight, italic, text = "") {
+    for (const subset of text ? [text, ""] : [""]) {
+      const variants = await googleVariants(family, subset).catch(() => []);
+      if (!variants.length) continue;
+      const v = pickVariant(variants, weight, italic);
+      const b64 = await fetchFile(v.url).catch(() => null);
+      if (b64 && (!subset || laysOut(v.url, b64, subset))) return { ...v, b64 };
+    }
+    return null;
+  }
+
   async function load({ family, weight, italic }, text = "", pageFaces = []) {
     const face = pickPageFace(pageFaces, { family, weight, italic });
     if (face) {
@@ -73,13 +107,8 @@ export function createFontLoader(net, bundled) {
       }
     }
     for (const fam of [family, FALLBACK_FAMILY]) {
-      let variants = await googleVariants(fam, text).catch(() => []);
-      if (!variants.length && text) variants = await googleVariants(fam, "").catch(() => []);
-      if (!variants.length) continue;
-      const v = pickVariant(variants, weight, italic);
-      try {
-        return { b64: await fetchFile(v.url), weight: v.weight, italic: v.italic, family: fam === family ? undefined : fam, source: "google" };
-      } catch {}
+      const file = await googleFace(fam, weight, italic, text);
+      if (file) return { b64: file.b64, weight: file.weight, italic: file.italic, family: fam === family ? undefined : fam, source: "google" };
     }
     if (bundled) {
       const w = [300, 400, 500, 600, 700].reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
@@ -89,7 +118,7 @@ export function createFontLoader(net, bundled) {
     return { error: `font not available: ${family}` };
   }
 
-  return { load, isOnGoogle };
+  return { load, isOnGoogle, googleFace };
 }
 
 function pickVariant(variants, weight, italic) {
@@ -166,37 +195,86 @@ const SIMILAR = {
   "ys display": "Inter",
   "new york": "Noto Serif",
 };
+// Family names are compared by this key: CSS matches them case-insensitively, and sites
+// write "montserrat", "Open-Sans" or "OpenSans" for the same family.
+const familyKey = (name) => name.toLowerCase().replace(/[\s_-]+/g, "");
+
+const SIMILAR_BY_KEY = new Map(Object.entries(SIMILAR).map(([name, target]) => [familyKey(name), target]));
 // Families by prefix (SF Pro Text / SF Pro Display / SF Compact …).
 const SIMILAR_PREFIX = [
-  [/^sf (pro|compact|ui)/, "Inter"],
-  [/^-?apple/, "Inter"],
+  [/^sf(pro|compact|ui)/, "Inter"],
+  [/^apple/, "Inter"],
   [/^helvetica/, "Arimo"],
 ];
-const similarFor = (fam) => {
-  const key = fam.toLowerCase();
-  return SIMILAR[key] || SIMILAR_PREFIX.find(([re]) => re.test(key))?.[1];
-};
+
+// Google Fonts catalogue (scripts/google-fonts.mjs): exact family names, so a family the
+// page spells differently still reaches Figma under the name Figma knows.
+const GOOGLE_FAMILIES = new Map(GOOGLE_FONTS.families.map(([family]) => [familyKey(family), family]));
 
 const unquote = (f) => f.trim().replace(/^["']|["']$/g, "").trim();
 export const firstFamily = (stack) => unquote(stack.split(",")[0] || "");
 
-// Name as is, or without a technical suffix ("Inter Variable", "Mona Sans VF").
-function nameVariants(fam) {
-  const base = fam.replace(/[\s_-]*(var|variable|vf|web|webfont|wf)$/i, "").trim();
-  return [...new Set([fam, base].filter(Boolean))];
+// Style words a family name may end with: one @font-face family per style ("Montserrat-Bold",
+// "GilroySemiBold", "Roboto Medium Italic") and technical suffixes ("Inter Var", "Mona Sans VF").
+// Longer words first, so "SemiBold" isn't read as "Bold".
+const STYLE_SUFFIXES = [
+  ["extralight", 200], ["ultralight", 200], ["semibold", 600], ["demibold", 600], ["extrabold", 800], ["ultrabold", 800],
+  ["hairline", 100], ["thin", 100], ["light", 300], ["regular", 400], ["normal", 400], ["book", 400], ["roman", 400],
+  ["medium", 500], ["demi", 600], ["bold", 700], ["heavy", 800], ["black", 900],
+  ["italic", "italic"], ["oblique", "italic"],
+  ["variable", null], ["var", null], ["vf", null], ["webfont", null], ["web", null], ["wf", null],
+];
+
+/**
+ * Readings of a CSS family name, from the full name down to the bare family, each with the
+ * style its stripped words name: "Montserrat-BoldItalic" → { name, readings: [
+ * { key: "montserratbolditalic" }, { key: "montserratbold", italic: true },
+ * { key: "montserrat", weight: 700, italic: true }] }. A real family that ends with a style
+ * word ("Archivo Black") is found by its full-name reading, without the style.
+ * next/font names ("__Open_Sans_a1b2c3", "__Inter_Fallback_a1b2c3") are unwrapped first.
+ */
+export function parseFamilyName(family) {
+  const next = /^__(.+?)(?:_Fallback)?_[0-9a-f]{5,8}$/i.exec(family);
+  const name = next ? next[1].replace(/_/g, " ") : family;
+  let reading = { key: familyKey(name) };
+  const readings = [reading];
+  for (let found = true; found; ) {
+    found = false;
+    for (const [suffix, value] of STYLE_SUFFIXES) {
+      if (reading.key.length < suffix.length + 3 || !reading.key.endsWith(suffix)) continue;
+      reading = { ...reading, key: reading.key.slice(0, -suffix.length) };
+      if (value === "italic") reading.italic = true;
+      else if (typeof value === "number") reading.weight ??= value;
+      readings.push(reading);
+      found = true;
+      break;
+    }
+  }
+  return { name, readings };
 }
 
-// Pick the font Figma will get, by the stack's main (first) family. Figma has every Google
-// font, so a family that is on Google Fonts is kept (if the page ships the file itself, its
-// exact metrics are still used). Known commercial/system fonts get a similar Google font
-// (SIMILAR); anything unrecognised gets one default font — Inter.
+// Pick the font Figma will get, by the stack's main (first) family → { family, weight?, italic? }.
+// Figma has every Google font, so a Google family is kept under its exact name (if the page
+// ships the file itself, its metrics are still used). Known commercial/system fonts get a
+// similar Google font (SIMILAR); anything unrecognised gets one default font — Inter.
+// weight/italic: the style the family name itself spells ("Montserrat-Bold").
 export async function resolveStack(stack, text, fonts) {
   const fam = firstFamily(stack);
-  if (!fam) return FALLBACK_FAMILY;
-  for (const name of nameVariants(fam)) {
-    if (!similarFor(name) && (await fonts.isOnGoogle(name, text))) return name;
+  if (!fam) return { family: FALLBACK_FAMILY };
+  const { name, readings } = parseFamilyName(fam);
+  const styleOf = (r) => ({ ...(r.weight && { weight: r.weight }), ...(r.italic && { italic: true }) });
+  for (const r of readings) {
+    const family = SIMILAR_BY_KEY.get(r.key) || GOOGLE_FAMILIES.get(r.key);
+    if (family) return { family, ...styleOf(r) };
   }
-  return similarFor(fam) || FALLBACK_FAMILY;
+  // Prefixes from the barest reading: "HelveticaNeue-Bold" is Arimo Bold, not Arimo.
+  for (const r of [...readings].reverse()) {
+    const family = SIMILAR_PREFIX.find(([re]) => re.test(r.key))?.[1];
+    if (family) return { family, ...styleOf(r) };
+  }
+  // A family newer than the bundled catalogue: ask Google by its exact name.
+  if (await fonts.isOnGoogle(name, text)) return { family: name };
+  return { family: FALLBACK_FAMILY, ...styleOf(readings.at(-1)) };
 }
 
 // ---- Fonts the page itself uses (@font-face) ----

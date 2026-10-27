@@ -64,6 +64,33 @@ const absolute = (message, node) => {
   }
   return pos;
 };
+const nodeKey = (g) => `${g.sessionID}:${g.localID}`;
+const parentOf = (message, node) => node.parentIndex && message.nodeChanges.find((n) => nodeKey(n.guid) === nodeKey(node.parentIndex.guid));
+const textNode = (message, start) => message.nodeChanges.find((n) => n.type === "TEXT" && n.textData?.characters?.startsWith(start));
+// Capture with the layers of elements that have an id (through the trace), plus `readPage()`
+// evaluated in the page while the capture's DOM changes are still in place.
+async function captureById(pageUrl, width, readPage = () => null) {
+  const result = await capturePage({
+    url: pageUrl,
+    width,
+    inspect: async (page, trace) => ({
+      ids: await page.evaluate((entries) => {
+        const out = {};
+        for (const e of entries) {
+          if (e.domPath.includes("::text")) continue;
+          const el = e.domPath === ":scope" ? document.body : document.body.querySelector(e.domPath);
+          if (el?.id && !(el.id in out)) out[el.id] = `${e.guid.sessionID}:${e.guid.localID}`;
+        }
+        return out;
+      }, trace.entries),
+      page: await page.evaluate(readPage),
+    }),
+  });
+  const message = decode(result.clipboardHtml);
+  const byKey = new Map(message.nodeChanges.map((n) => [nodeKey(n.guid), n]));
+  const nodes = Object.fromEntries(Object.entries(result.inspected.ids).map(([id, key]) => [id, byKey.get(key)]));
+  return { result, message, nodes, page: result.inspected.page };
+}
 const withTimeout = (promise, ms) => {
   let timer;
   return Promise.race([promise, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`no result in ${ms} ms`)), ms)))]).finally(() => clearTimeout(timer));
@@ -173,6 +200,49 @@ try {
   const [one, three] = [itemPos("One"), itemPos("Three")];
   check("clearfix ::after keeps the menu on one line", one && three && Math.abs(one.y - three.y) < 1 && three.x > 250, JSON.stringify({ one, three }));
   check("pseudo-elements that paint nothing are not materialized", pseudo.debug.fixes.pseudo === 0, `pseudo ${pseudo.debug.fixes.pseudo}`);
+
+  // Font names: every text must reach Figma under a family and style Figma has.
+  const fonts = await captureById(url + "fonts.html", 900, () => ({
+    helvStack: document.getElementById("helv").style.fontFamily,
+    montserratLoaded: [...document.fonts].some((f) => f.family.replace(/["']/g, "") === "Montserrat" && f.status === "loaded"),
+  }));
+  const fontOf = (start) => {
+    const n = textNode(fonts.message, start);
+    return n ? `${n.fontName.family} / ${n.fontName.style}` : "no layer";
+  };
+  const expectFont = (name, start, expected) => check(name, fontOf(start) === expected, fontOf(start));
+  expectFont("Inter 600 gets Figma's style name (Semi Bold)", "SystemSemi", "Inter / Semi Bold");
+  expectFont("Inter 800 gets Figma's style name (Extra Bold)", "SansExtra", "Inter / Extra Bold");
+  expectFont("lowercase Google family keeps the family", "LowerMont", "Montserrat / SemiBold");
+  expectFont("family named after its style gets family and weight", "AliasMont", "Montserrat / Bold");
+  expectFont("next/font family name is unwrapped", "NextOpen", "Open Sans / Regular");
+  expectFont("commercial family named after its style keeps the weight", "GilroySemi", "Manrope / SemiBold");
+  expectFont("prefix-matched family keeps the weight", "HelvBold", "Arimo / Bold");
+  expectFont("Google family ending with a style word stays itself", "ArchivoBlack", "Archivo Black / Regular");
+  check("substitute keeps the page's stack as fallback", /^"?Arimo"?, .*Arial/.test(fonts.page.helvStack), fonts.page.helvStack);
+  check("substitute font is loaded into the page", fonts.page.montserratLoaded);
+  const lineHeight = (start) => JSON.stringify(textNode(fonts.message, start)?.lineHeight);
+  check("unitless line-height becomes relative (RAW)", lineHeight("RawLine") === JSON.stringify({ value: 1.5, units: "RAW" }), lineHeight("RawLine"));
+  check("pixel line-height stays pixels", lineHeight("PixelLine") === JSON.stringify({ value: 30, units: "PIXELS" }), lineHeight("PixelLine"));
+  check("normal line-height stays pixels", JSON.parse(lineHeight("NormalLine") || "{}").units === "PIXELS", lineHeight("NormalLine"));
+
+  // Auto layout and layer names.
+  const layout = await captureById(url + "layout.html", 1000);
+  const { nodes } = layout;
+  check("flex button with bare text gets auto layout", nodes.buy?.stackMode === "HORIZONTAL", nodes.buy?.stackMode);
+  const guardedText = textNode(layout.message, "Guarded");
+  const guardedDx = guardedText && nodes.guarded ? absolute(layout.message, guardedText).x - absolute(layout.message, nodes.guarded).x : NaN;
+  check("text is not wrapped where CSS targets element children", Math.abs(guardedDx) < 1, `text offset ${guardedDx}`);
+  check("align-items: baseline becomes baseline alignment", nodes.baseline?.stackCounterAlignItems === "BASELINE", nodes.baseline?.stackCounterAlignItems);
+  check("baseline in a column falls back to start", nodes.column?.stackMode === "VERTICAL" && (nodes.column.stackCounterAlignItems ?? "MIN") === "MIN", `${nodes.column?.stackMode} ${nodes.column?.stackCounterAlignItems}`);
+  check("space-evenly becomes SPACE_EVENLY", nodes.evenly?.stackPrimaryAlignItems === "SPACE_EVENLY", nodes.evenly?.stackPrimaryAlignItems);
+  const frameNames = layout.message.nodeChanges.filter((n) => n.type === "FRAME").map((n) => n.name);
+  check("semantic frame is named after its id", nodes.hero?.name === "Section · hero", nodes.hero?.name);
+  check("frame is named after its class", frameNames.includes("product-card"), frameNames.join(", "));
+  check("CSS module hash is dropped from the name", frameNames.includes("Header_root"), frameNames.join(", "));
+  check("utility classes don't name a frame", parentOf(layout.message, textNode(layout.message, "Utility"))?.name === "Container", parentOf(layout.message, textNode(layout.message, "Utility"))?.name);
+  const image = layout.message.nodeChanges.find((n) => n.fillPaints?.some((p) => p.type === "IMAGE") && n.name === "Company logo");
+  check("image is named after its alt text", Boolean(image));
 
   // As in a background tab: requestAnimationFrame never fires. The canvas snapshot waited
   // for it forever.

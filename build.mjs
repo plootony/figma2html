@@ -97,6 +97,52 @@ const PATCHES = [
     replace: "\tconst finalPosition = globalThis.__s2fRootAtOrigin && parentGuid === ROOT_FRAME_GUID ? position : positionOverride ?? position;",
   },
   {
+    // justify-content: space-evenly is Figma's SPACE_EVENLY (was CENTER, which failed the
+    // geometry check, so such rows stayed absolutely positioned).
+    find: "\t\"space-evenly\": \"CENTER\",",
+    replace: "\t\"space-evenly\": \"SPACE_EVENLY\",",
+  },
+  {
+    find: [
+      "\t\tcase \"SPACE_BETWEEN\":",
+      "\t\t\tspacing = count > 1 ? (inner - totalChildren) / (count - 1) : 0;",
+      "\t\t\tbreak;",
+    ].join("\n"),
+    replace: [
+      "\t\tcase \"SPACE_BETWEEN\":",
+      "\t\t\tspacing = count > 1 ? (inner - totalChildren) / (count - 1) : 0;",
+      "\t\t\tbreak;",
+      "\t\tcase \"SPACE_EVENLY\":",
+      "\t\t\tspacing = (inner - totalChildren) / (count + 1);",
+      "\t\t\tcursor += spacing;",
+      "\t\t\tbreak;",
+    ].join("\n"),
+  },
+  {
+    find: "const distributesFreeSpace = spec.stackPrimaryAlignItems === \"SPACE_BETWEEN\" || hasGrower;",
+    replace: "const distributesFreeSpace = spec.stackPrimaryAlignItems === \"SPACE_BETWEEN\" || spec.stackPrimaryAlignItems === \"SPACE_EVENLY\" || hasGrower;",
+  },
+  {
+    // align-items: baseline → Figma's baseline alignment. Only along a row (a column falls
+    // back to start, as in CSS) and only for text items (globalThis.__s2fBaselineItem):
+    // Figma aligns text layers by their first baseline the way CSS does; boxes it aligns
+    // differently. Cross positions then come from Figma, so the geometry check skips them.
+    find: "\tend: \"MAX\"\n};\n/** Block-level outer displays",
+    replace: "\tend: \"MAX\",\n\tbaseline: \"BASELINE\"\n};\n/** Block-level outer displays",
+  },
+  {
+    find: "\tconst align = ALIGN_MAP[style.alignItems];",
+    replace: [
+      "\tlet align = ALIGN_MAP[style.alignItems];",
+      "\tif (align === \"BASELINE\" && !isRow) align = \"MIN\";",
+      "\tif (align === \"BASELINE\" && !input.flow.every((child) => globalThis.__s2fBaselineItem?.(child))) return null;",
+    ].join("\n"),
+  },
+  {
+    find: "\t\tconst actualCross = isRow ? rect.y : rect.x;",
+    replace: "\t\tconst actualCross = isRow ? rect.y : rect.x;\n\t\tif (spec.stackCounterAlignItems === \"BASELINE\") expectedCross = actualCross;",
+  },
+  {
     // PostScript name from the page's own font file can belong to another cut of the family
     // (FinlandicaText-Regular for CSS family "Finlandica"). Figma looks the font up by it and
     // pastes empty text layers. Google/Figma name fonts <FamilyNoSpaces>-<StyleNoSpaces>,

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>S2F auto layout and names</title>
+<style>
+  body { margin: 0; font: 16px/1.4 Georgia, serif; }
+  .ico { display: inline-block; width: 16px; height: 16px; background: #f90; }
+  #buy { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border: 0; background: #222; color: #fff; font: inherit; }
+  /* Wrapping the text would take :first-child from the icon and move it: must stay as is. */
+  #guarded { display: flex; margin: 0; padding: 0; }
+  #guarded > :first-child { margin-left: 30px; }
+  #baseline { display: flex; align-items: baseline; gap: 12px; }
+  #baseline .big { font-size: 32px; }
+  #column { display: flex; flex-direction: column; align-items: baseline; gap: 4px; }
+  #evenly { display: flex; justify-content: space-evenly; width: 600px; }
+</style>
+</head>
+<body>
+<section id="hero">
+  <button id="buy">Buy now <span class="ico"></span></button>
+  <div id="guarded">Guarded text <span class="ico"></span></div>
+  <div id="baseline"><span class="big">Price</span><span>per month</span></div>
+  <div id="column"><span>Column one</span><span>Column two</span></div>
+  <div id="evenly"><span class="ico"></span><span class="ico"></span><span class="ico"></span></div>
+  <div class="product-card"><p>Card body</p></div>
+  <div class="flex gap-4 p-2"><p>Utility classes</p></div>
+  <div class="Header_root__a1B2c"><p>Module class</p></div>
+  <img alt="Company logo" width="20" height="20" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==">
+</section>
+</body>
+</html>

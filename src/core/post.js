@@ -77,6 +77,30 @@ export function fixBlankGlyphs(message) {
   return fixed;
 }
 
+// Style names as Figma has them, where they differ from the converter's "SemiBold"-style
+// names. Figma ships Inter 3, whose styles are spaced ("Semi Bold"): text named "SemiBold"
+// pasted with a missing font. Families not listed here keep the Google Fonts names.
+const FIGMA_STYLE_NAMES = {
+  Inter: { ExtraLight: "Extra Light", SemiBold: "Semi Bold", ExtraBold: "Extra Bold" },
+};
+
+export function fixFigmaStyleNames(message) {
+  const rename = (font) => {
+    const names = font && FIGMA_STYLE_NAMES[font.family];
+    const [base, italic] = (font?.style || "").split(/ (?=Italic$)/);
+    if (!names?.[base]) return false;
+    font.style = italic ? `${names[base]} ${italic}` : names[base];
+    return true;
+  };
+  let fixed = 0;
+  for (const n of message.nodeChanges) {
+    if (n.type !== "TEXT") continue;
+    if (rename(n.fontName)) fixed++;
+    for (const meta of n.derivedTextData?.fontMetaData || []) rename(meta.key);
+  }
+  return fixed;
+}
+
 // Center/right alignment: the converter offsets lines inside (box width + safety buffer)
 // and ignores the letter-spacing after the last glyph, shifting lines by a few px.
 // Re-align each line inside the real box, as CSS does (trailing spaces hang).

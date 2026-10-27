@@ -17,7 +17,7 @@ import { prepareSvgImages, resolveSvgUses, rasterizeSvg, isSvgUrl, fileName } fr
 import { snapshotMediaElements, applySnapshots } from "./snapshots.js";
 import { ICON_FONT, rasterizeIconFonts, applyIconFonts } from "./icons.js";
 import { zipSync, strToU8 } from "fflate";
-import { decodePayload, sanitize, fixBlankGlyphs, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile, mergeMessages } from "./post.js";
+import { decodePayload, sanitize, fixBlankGlyphs, fixFigmaStyleNames, fixTextLayout, fixAutoLayoutSizing, fixSiblingOrder, setPrototypeDevice, shiftTextBox, optimizeImages, stats, toClipboardHtml, toFigFile, mergeMessages } from "./post.js";
 
 // Elements that never paint themselves (the converter tried to turn <source> into a frame and failed).
 const NON_RENDERED = new Set(["source", "track", "param", "area", "map", "datalist", "option", "optgroup", "base", "wbr"]);
@@ -289,48 +289,80 @@ async function collectFontFaces(net) {
 
 // Fonts Figma doesn't have (not on Google Fonts: SF Pro, Motiva Sans, Arial, Times…) are
 // replaced with similar Google fonts in the page itself, so the browser layout and the
-// Figma file use the same, available font. Icon fonts are left alone.
+// Figma file use the same, available font. Google families the page names its own way
+// ("montserrat", "Montserrat-Bold", next/font's "__Inter_a1b2c3") get their exact name and
+// the style the name spells. Icon fonts are left alone.
 async function substituteFonts(chars, fonts, journal, bundledFont, root = document.body) {
-  const elements = subtreeMany(root);
-  const stacks = new Set();
-  for (const el of elements) if (isTextElement(el)) stacks.add(getComputedStyle(el).fontFamily);
-  const plan = {};
+  // Read every style before writing any: an inline font-family on a parent changes the
+  // computed stack of its children.
+  const items = subtreeMany(root).map((el) => {
+    const cs = getComputedStyle(el);
+    return { el, stack: cs.fontFamily, weight: Number(cs.fontWeight) || 400, italic: cs.fontStyle !== "normal", text: isTextElement(el) };
+  });
+  const plan = new Map(); // stack -> { family, weight?, italic? }
   const mapping = new Map();
-  for (const stack of stacks) {
+  for (const stack of new Set(items.filter((i) => i.text).map((i) => i.stack))) {
     const first = firstFamily(stack);
     if (ICON_FONT.test(first)) continue;
     const target = await resolveStack(stack, chars, fonts);
-    mapping.set(`${first}->${target}`, { from: first, to: target });
-    if (target !== first) plan[stack] = target;
+    const to = target.family + (target.weight ? ` ${target.weight}` : "") + (target.italic ? " italic" : "");
+    mapping.set(`${first}->${to}`, { from: first, to });
+    if (target.family !== first || target.weight || target.italic) plan.set(stack, target);
   }
-  const targets = [...new Set(Object.values(plan))];
-  if (!targets.length) return { changes: [], mapping: [...mapping.values()] };
+  if (!plan.size) return { changes: [], mapping: [...mapping.values()] };
 
-  const spec = "100,200,300,400,500,600,700,800,900,100i,200i,300i,400i,500i,600i,700i,800i,900i";
-  await Promise.all(
-    targets.map(
-      (fam) =>
-        new Promise((resolve) => {
-          const link = document.createElement("link");
-          link.rel = "stylesheet";
-          link.href = `https://fonts.googleapis.com/css?family=${encodeURIComponent(fam)}:${spec}&display=block`;
-          link.onload = link.onerror = resolve;
-          setTimeout(resolve, 8000); // never hang on a stalled stylesheet request
-          document.head.appendChild(link);
-          journal.add(link);
-        })
-    )
-  );
-  for (const el of elements) {
-    const target = plan[getComputedStyle(el).fontFamily];
-    if (target) journal.set(el, "font-family", `"${target}"`);
+  // The substitute goes first and the page's own stack after it: if the substitute can't be
+  // loaded, the text keeps the site's font instead of falling back to the browser default.
+  const needed = new Map(); // family -> Map("weight|italic" -> [weight, italic])
+  for (const item of items) {
+    const target = plan.get(item.stack);
+    if (!target) continue;
+    journal.set(item.el, "font-family", `"${target.family}", ${item.stack}`);
+    let { weight, italic } = item;
+    // A face named after its style ("Montserrat-Bold") is declared with the normal weight
+    // and drawn bold anyway; under the real family name the weight has to be spelled out.
+    if (target.weight && weight === 400) {
+      weight = target.weight;
+      journal.set(item.el, "font-weight", String(weight));
+    }
+    if (target.italic && !italic) {
+      italic = true;
+      journal.set(item.el, "font-style", "italic");
+    }
+    if (!item.text) continue;
+    if (!needed.has(target.family)) needed.set(target.family, new Map());
+    needed.get(target.family).set(`${weight}|${italic}`, [weight, italic]);
   }
-  document.body.offsetHeight; // force layout so the browser requests the new fonts
+
+  // Families the page doesn't have (it may already have "Montserrat" under "montserrat"):
+  // loaded from the same Google files the converter measures, as bytes — no stylesheet
+  // request that the page's CSP could block.
+  const pageFamilies = new Set([...document.fonts].map((f) => f.family.replace(/["']/g, "").toLowerCase()));
+  const loaded = new Set();
+  await Promise.all(
+    [...needed]
+      .filter(([family]) => !pageFamilies.has(family.toLowerCase()))
+      .flatMap(([family, styles]) =>
+        [...styles.values()].map(async ([weight, italic]) => {
+          const face = await fonts.googleFace(family, weight, italic, chars).catch(() => null);
+          const key = face && `${family}|${face.weight}|${face.italic}`;
+          if (!face || loaded.has(key)) return;
+          loaded.add(key);
+          try {
+            const fontFace = new FontFace(family, base64ToBytes(face.b64), { weight: String(face.weight), style: face.italic ? "italic" : "normal" });
+            await fontFace.load();
+            document.fonts.add(fontFace);
+            journal.undo(() => document.fonts.delete(fontFace));
+          } catch {}
+        })
+      )
+  );
+  document.body.offsetHeight;
   await Promise.race([document.fonts.ready, wait(8000)]);
   // Google Fonts unreachable: give the page the bundled Inter (loaded from bytes, no network,
   // not subject to the page's CSP), so the page and the Figma file are laid out alike.
   const interLoaded = [...document.fonts].some((f) => f.family.replace(/["']/g, "") === "Inter" && f.status === "loaded");
-  if (targets.includes("Inter") && bundledFont && !interLoaded) {
+  if (needed.has("Inter") && bundledFont && !interLoaded) {
     console.info("site2figma: Google Fonts unreachable, using bundled Inter in the page");
     for (const weight of [300, 400, 500, 600, 700]) {
       try {
@@ -345,7 +377,7 @@ async function substituteFonts(chars, fonts, journal, bundledFont, root = docume
     document.body.offsetHeight;
   }
   return {
-    changes: [...new Set(Object.entries(plan).map(([stack, t]) => `${firstFamily(stack)} → ${t}`))],
+    changes: [...mapping.values()].filter((m) => m.from !== m.to).map((m) => `${m.from} → ${m.to}`),
     mapping: [...mapping.values()],
   };
 }
@@ -420,6 +452,117 @@ function collapseWhitespace(journal, root = document.body) {
     if (next === text) continue;
     node.textContent = next;
     journal.undo(() => (node.textContent = text));
+    changed++;
+  }
+  return changed;
+}
+
+// Text directly inside a flex or grid container is an anonymous item, which the converter
+// doesn't model: such containers ("Купить <icon>" buttons, badges) stayed absolutely
+// positioned instead of auto layout. Each text run is wrapped in an element — the same
+// layout, unless the site's CSS targets element children (`> :first-child`), so the geometry
+// is compared and those containers are unwrapped again.
+const NO_TEXT_WRAP = new Set(["TEXTAREA", "SELECT", "OPTION", "SCRIPT", "STYLE", "TEMPLATE"]);
+function wrapFlexText(journal, root = document.body) {
+  const containers = [];
+  for (const el of subtreeMany(root)) {
+    if (NO_TEXT_WRAP.has(el.tagName) || el.closest("svg")) continue;
+    if (!/^(inline-)?(flex|grid)$/.test(getComputedStyle(el).display)) continue;
+    const texts = [...el.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim());
+    if (texts.length) containers.push({ el, texts, kids: [...el.children] });
+  }
+  if (!containers.length) return 0;
+  const textRect = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return range.getBoundingClientRect();
+  };
+  const rectsOf = (c) => [c.el, ...c.kids].map((n) => n.getBoundingClientRect()).concat(c.texts.map(textRect));
+  const same = (a, b) => a.every((r, i) => ["left", "top", "width", "height"].every((k) => Math.abs(r[k] - b[i][k]) < 0.5));
+  const unwrap = (c) => c.wrappers.forEach((w) => w.replaceWith(...w.childNodes));
+  for (const c of containers) c.before = rectsOf(c);
+  for (const c of containers) {
+    c.wrappers = c.texts.map((text) => {
+      const wrapper = document.createElement("s2f-text");
+      text.replaceWith(wrapper);
+      wrapper.append(text);
+      return wrapper;
+    });
+  }
+  let kept = containers.filter((c) => same(c.before, rectsOf(c)));
+  if (kept.length < containers.length) {
+    containers.filter((c) => !kept.includes(c)).forEach(unwrap);
+    // Unwrapping one container can move another (nesting): all or nothing on a second miss.
+    if (kept.some((c) => !same(c.before, rectsOf(c)))) {
+      kept.forEach(unwrap);
+      kept = [];
+    }
+  }
+  for (const c of kept) journal.undo(() => unwrap(c));
+  return kept.length;
+}
+
+// Flex items Figma aligns by baseline the way CSS does (see build.mjs): plain text, which the
+// converter turns into text layers. Boxes get a synthesized baseline in CSS that Figma lacks.
+globalThis.__s2fBaselineItem = (el) => !el.children.length && TEXT_CHAR.test(el.textContent);
+
+// The converter names frames by tag ("Container", "Section"…). Designers find their way by the
+// names the site uses: the id, a meaningful class, aria-label; images by alt text or file name.
+const TAG_NAMES = new Set(["Container", "Section", "Navigation", "Sidebar", "Header", "Footer", "Button", "Table", "Table Row", "Table Head", "Table Body", "Table Header", "Table Footer", "Table Cell"]);
+// Utility, state and generated classes say nothing about the block (Tailwind, Bootstrap,
+// styled-components, CSS-in-JS hashes…).
+const NOT_A_NAME =
+  /[:[\]/.%]|^(css|sc|jsx|svelte|emotion|js|is|has)-|^-?[mp][trblxyse]?-|^(w|h|min-w|max-w|min-h|max-h|size|gap|space-[xy]|text|bg|border|rounded|shadow|font|leading|tracking|items|justify|content|self|place|grid|grid-cols|col|col-span|row-span|flex|inline|block|inline-block|hidden|visible|relative|absolute|fixed|sticky|static|z|top|left|right|bottom|inset|overflow|opacity|transition|duration|ease|delay|cursor|select|order|grow|shrink|basis|object|aspect|sr-only|underline|uppercase|lowercase|capitalize|truncate|whitespace|break|align|list|outline|ring|fill|stroke|d|container|clearfix)(-|$)/;
+// CSS modules: "Header_root__a1B2c" → "Header_root" (BEM "card__title" is kept).
+const withoutHash = (cls) => cls.replace(/_{1,2}(?=[\w-]*[\dA-Z])[\w-]{5,8}$/, "");
+function siteName(el) {
+  if (el.id && !/[:]|^_|\d{3,}/.test(el.id)) return el.id;
+  for (const cls of el.classList) {
+    const name = withoutHash(cls);
+    if (name.length > 1 && !NOT_A_NAME.test(name)) return name;
+  }
+  return el.getAttribute("aria-label")?.trim() || null;
+}
+
+function nameLayers(message, trace) {
+  const byId = new Map(message.nodeChanges.map((n) => [`${n.guid.sessionID}:${n.guid.localID}`, n]));
+  let named = 0;
+  for (const e of trace.entries) {
+    if ((e.kind !== "frame" && e.kind !== "image") || e.domPath === ":scope" || e.domPath.includes("::text")) continue;
+    const n = byId.get(`${e.guid.sessionID}:${e.guid.localID}`);
+    const el = n && resolveTraceElement(e.domPath);
+    if (!el) continue;
+    let name = null;
+    if (n.name === "Image" && el.tagName === "IMG") {
+      const src = el.currentSrc || el.src || "";
+      name = el.alt?.trim() || (src.startsWith("data:") ? null : fileName(src).replace(/\.\w+$/, ""));
+    } else if (TAG_NAMES.has(n.name)) {
+      const site = siteName(el);
+      if (site) name = n.name === "Container" ? site : `${n.name} · ${site}`;
+    }
+    if (!name) continue;
+    n.name = name.slice(0, 60);
+    named++;
+  }
+  return named;
+}
+
+// A unitless CSS line-height (1.5) scales with the font size, and so does Figma's percentage
+// line height (RAW units: 1.5 shows as 150%). Pixel values and `normal` (pinned to pixels by
+// normalizeTypography) stay pixels.
+function relativeLineHeights(message, trace) {
+  const byId = new Map(message.nodeChanges.map((n) => [`${n.guid.sessionID}:${n.guid.localID}`, n]));
+  let changed = 0;
+  for (const e of trace.entries) {
+    if (e.kind !== "text") continue;
+    const n = byId.get(`${e.guid.sessionID}:${e.guid.localID}`);
+    if (n?.type !== "TEXT" || n.lineHeight?.units !== "PIXELS") continue;
+    const el = resolveTraceElement(e.domPath.replace(/::text\[\d+\]$/, ""));
+    const value = el?.computedStyleMap?.().get("line-height");
+    if (!(value instanceof CSSUnitValue) || value.unit !== "number" || !(value.value > 0)) continue;
+    // The same height as the converter measured, only relative.
+    if (Math.abs(value.value * n.fontSize - n.lineHeight.value) > 0.5) continue;
+    n.lineHeight = { value: value.value, units: "RAW" };
     changed++;
   }
   return changed;
@@ -903,6 +1046,7 @@ export async function capture(options, env) {
     const pseudo = materializePseudoElements(journal, roots);
     let whitespace = 0;
     for (const root of roots) whitespace += collapseWhitespace(journal, root);
+    const flexText = wrapFlexText(journal, roots);
     progress("SVG…");
     cancel();
     let svgUses = 0;
@@ -1117,12 +1261,15 @@ export async function capture(options, env) {
         lineBoxes: alignTextBoxesToLineBox(message, result.trace, rootTop),
         backgrounds: await addBackgroundImages(message, result.trace, net, resolveTraceElement),
         sectionBackgrounds: applySectionBackgrounds(message, result.trace, bodyBackgrounds, resolveTraceElement),
+        layerNames: nameLayers(message, result.trace),
         snapshots: applySnapshots(message, result.trace, snapshots, resolveTraceElement),
         svgNamed: nameSvgImages(message, result.trace, svgOriginals),
         hugWithFill: fixAutoLayoutSizing(message),
         siblingGroups: fixSiblingOrder(message),
         scrollBehavior: markScrollBehavior(message, result.trace),
         prototypeDevice: setPrototypeDevice(message, { width: frame.width, height: viewportHeight }),
+        relativeLineHeights: relativeLineHeights(message, result.trace),
+        figmaStyleNames: fixFigmaStyleNames(message),
       };
       for (const [k, v] of Object.entries(one)) fixes[k] = (fixes[k] || 0) + v;
       fixTextLayout(message);
@@ -1135,6 +1282,7 @@ export async function capture(options, env) {
     }
     fixes.pseudo = pseudo;
     fixes.whitespace = whitespace;
+    fixes.flexText = flexText;
     fixes.svgInlined = svgInlined;
     fixes.svgUses = svgUses;
 
